@@ -1,0 +1,300 @@
+import Foundation
+import Virtualization
+
+enum Persistence {
+    static let defaults: UserDefaults = {
+        guard let suite = ProcessInfo.processInfo.environment["HAOS_RUNNER_DEFAULTS_SUITE"] else {
+            return .standard
+        }
+        guard let overridden = UserDefaults(suiteName: suite) else {
+            fatalError("Invalid HAOS_RUNNER_DEFAULTS_SUITE: \(suite)")
+        }
+        return overridden
+    }()
+}
+
+enum Paths {
+    static let support: URL = {
+        if let overridden = ProcessInfo.processInfo.environment["HAOS_RUNNER_SUPPORT_DIR"] {
+            return URL(fileURLWithPath: overridden, isDirectory: true)
+        }
+        return FileManager.default
+            .homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/HAOSRunner", directoryHint: .isDirectory)
+    }()
+
+    static let diskImage = support.appending(path: "haos.img")
+    static let efiStore = support.appending(path: "efi-vars.fd")
+    static let savedState = support.appending(path: "machine-state.vzvmsave")
+
+    static func ensureSupportDirectory() throws {
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+    }
+
+    private static let sourceKey = "sourceImagePath"
+
+    static var sourceImage: URL? {
+        get {
+            guard let path = Persistence.defaults.string(forKey: sourceKey),
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+        set { Persistence.defaults.set(newValue?.path(percentEncoded: false), forKey: sourceKey) }
+    }
+
+    static var hasWorkingDisk: Bool {
+        FileManager.default.fileExists(atPath: diskImage.path(percentEncoded: false))
+    }
+}
+
+struct VMSettings: Equatable {
+    var memoryGB: Int = 4
+    var cpuCount: Int = 4
+    var startOnLaunch: Bool = false
+
+    static let memoryRange = 2...16
+    static let cpuRange = 2...8
+
+    private static let memoryKey = "memoryGB"
+    private static let cpuKey = "cpuCount"
+    private static let startOnLaunchKey = "startOnLaunch"
+
+    static func load() -> VMSettings {
+        var settings = VMSettings()
+        let storedMemory = Persistence.defaults.integer(forKey: memoryKey)
+        let storedCPU = Persistence.defaults.integer(forKey: cpuKey)
+        if memoryRange.contains(storedMemory) { settings.memoryGB = storedMemory }
+        if cpuRange.contains(storedCPU) { settings.cpuCount = storedCPU }
+        settings.startOnLaunch = Persistence.defaults.bool(forKey: startOnLaunchKey)
+        return settings
+    }
+
+    func save() {
+        Persistence.defaults.set(memoryGB, forKey: Self.memoryKey)
+        Persistence.defaults.set(cpuCount, forKey: Self.cpuKey)
+        Persistence.defaults.set(startOnLaunch, forKey: Self.startOnLaunchKey)
+    }
+}
+
+enum SavedSession {
+    private static let configKey = "savedStateConfig"
+
+    static var exists: Bool {
+        FileManager.default.fileExists(atPath: Paths.savedState.path(percentEncoded: false))
+    }
+
+    static func record(_ settings: VMSettings) {
+        Persistence.defaults.set(fingerprint(settings), forKey: configKey)
+    }
+
+    static func matches(_ settings: VMSettings) -> Bool {
+        Persistence.defaults.string(forKey: configKey) == fingerprint(settings)
+    }
+
+    static func discard() {
+        try? FileManager.default.removeItem(at: Paths.savedState)
+        Persistence.defaults.removeObject(forKey: configKey)
+    }
+
+    private static func fingerprint(_ settings: VMSettings) -> String {
+        "\(settings.memoryGB)gb-\(settings.cpuCount)cpu"
+    }
+}
+
+enum VMError: LocalizedError {
+    case diskImageMissing
+    case noSourceImage
+    case toolMissing(String)
+    case configurationInvalid(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .diskImageMissing:
+            "No Home Assistant disk exists yet. Start Home Assistant to create one."
+        case .noSourceImage:
+            "No image to build the disk from. Start Home Assistant to download one, or choose a file in settings."
+        case .toolMissing(let name):
+            "\(name) was not found. Install it (brew install qemu) so images can be converted."
+        case .configurationInvalid(let detail):
+            "The virtual machine configuration was rejected: \(detail)"
+        }
+    }
+}
+
+enum Tooling {
+    static func locate(_ name: String) -> URL? {
+        let roots = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"]
+        let fromPath = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        for directory in roots + fromPath {
+            let candidate = URL(fileURLWithPath: directory).appending(path: name)
+            if FileManager.default.isExecutableFile(atPath: candidate.path(percentEncoded: false)) {
+                return candidate
+            }
+        }
+        return nil
+    }
+}
+
+enum DiskSource: Equatable {
+    case qcow2(URL)
+    case rawImage(URL)
+    case xzArchive(URL)
+    case none
+
+    static func resolve(userImage: URL?, cachedArchive: URL?) -> DiskSource {
+        if let userImage {
+            switch userImage.pathExtension.lowercased() {
+            case "qcow2": return .qcow2(userImage)
+            case "xz": return .xzArchive(userImage)
+            default: return .rawImage(userImage)
+            }
+        }
+        if let cachedArchive { return .xzArchive(cachedArchive) }
+        return .none
+    }
+}
+
+enum DiskBuilder {
+    static let diskSizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
+
+    static var hasSource: Bool {
+        DiskSource.resolve(userImage: Paths.sourceImage, cachedArchive: ImageDownloader.cachedArchive) != .none
+    }
+
+    static func rebuild() async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try rebuildBlocking()
+        }.value
+    }
+
+    private static func rebuildBlocking() throws {
+        try Paths.ensureSupportDirectory()
+        try? FileManager.default.removeItem(at: Paths.diskImage)
+        try? FileManager.default.removeItem(at: Paths.efiStore)
+
+        switch DiskSource.resolve(userImage: Paths.sourceImage, cachedArchive: ImageDownloader.cachedArchive) {
+        case .qcow2(let source):
+            try convertWithQemu(source)
+        case .rawImage(let source):
+            try FileManager.default.copyItem(at: source, to: Paths.diskImage)
+        case .xzArchive(let archive):
+            try ImageDownloader.decompress(archive: archive, to: Paths.diskImage)
+        case .none:
+            throw VMError.noSourceImage
+        }
+        try growDisk()
+    }
+
+    private static func convertWithQemu(_ source: URL) throws {
+        guard let qemuImg = Tooling.locate("qemu-img") else { throw VMError.toolMissing("qemu-img") }
+        let convert = Process()
+        convert.executableURL = qemuImg
+        convert.arguments = [
+            "convert", "-O", "raw",
+            source.path(percentEncoded: false),
+            Paths.diskImage.path(percentEncoded: false),
+        ]
+        try convert.run()
+        convert.waitUntilExit()
+        guard convert.terminationStatus == 0 else {
+            throw VMError.configurationInvalid("Could not rebuild the disk from \(source.lastPathComponent).")
+        }
+    }
+
+    private static func growDisk() throws {
+        let handle = try FileHandle(forWritingTo: Paths.diskImage)
+        defer { try? handle.close() }
+        let current = try handle.seekToEnd()
+        guard current < diskSizeBytes else { return }
+        try handle.truncate(atOffset: diskSizeBytes)
+    }
+}
+
+enum GuestAddressResolver {
+    static func resolve(mac: String) async -> String? {
+        await Task.detached {
+            resolveBlocking(mac: mac)
+        }.value
+    }
+
+    private static func resolveBlocking(mac: String) -> String? {
+        if let leases = try? String(contentsOfFile: DHCPLeases.filePath, encoding: .utf8),
+           let ip = DHCPLeases.ipAddress(forMAC: mac, in: leases) {
+            return ip
+        }
+        if let table = runARP(), let ip = ARPTable.ipAddress(forMAC: mac, in: table) {
+            return ip
+        }
+        return nil
+    }
+
+    private static func runARP() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
+        process.arguments = ["-an"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+enum StableMAC {
+    private static let key = "guestMACAddress"
+
+    static func address() -> VZMACAddress {
+        if let stored = Persistence.defaults.string(forKey: key), let mac = VZMACAddress(string: stored) {
+            return mac
+        }
+        let fresh = VZMACAddress.randomLocallyAdministered()
+        Persistence.defaults.set(fresh.string, forKey: key)
+        return fresh
+    }
+
+    static var current: String? { Persistence.defaults.string(forKey: key) }
+}
+
+enum VMBuilder {
+    @MainActor
+    static func makeConfiguration(_ settings: VMSettings) throws -> VZVirtualMachineConfiguration {
+        guard Paths.hasWorkingDisk else { throw VMError.diskImageMissing }
+
+        let config = VZVirtualMachineConfiguration()
+        config.cpuCount = settings.cpuCount
+        config.memorySize = UInt64(settings.memoryGB) * 1024 * 1024 * 1024
+
+        let loader = VZEFIBootLoader()
+        loader.variableStore = try efiVariableStore()
+        config.bootLoader = loader
+
+        let attachment = try VZDiskImageStorageDeviceAttachment(url: Paths.diskImage, readOnly: false)
+        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+
+        let network = VZVirtioNetworkDeviceConfiguration()
+        network.macAddress = StableMAC.address()
+        network.attachment = VZNATNetworkDeviceAttachment()
+        config.networkDevices = [network]
+
+        config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        config.serialPorts = [SerialConsole.shared.makeConfiguration()]
+
+        do {
+            try config.validate()
+        } catch {
+            throw VMError.configurationInvalid(error.localizedDescription)
+        }
+        return config
+    }
+
+    private static func efiVariableStore() throws -> VZEFIVariableStore {
+        try Paths.ensureSupportDirectory()
+        if FileManager.default.fileExists(atPath: Paths.efiStore.path(percentEncoded: false)) {
+            return VZEFIVariableStore(url: Paths.efiStore)
+        }
+        return try VZEFIVariableStore(creatingVariableStoreAt: Paths.efiStore)
+    }
+}

@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: swift test
+      - name: Build app
+        run: HAOS_RUNNER_APP_PATH="$PWD/HAOS Runner.app" ./build.sh
+      - name: Zip app
+        run: ditto -c -k --keepParent "HAOS Runner.app" "HAOS-Runner-${GITHUB_REF_NAME}.zip"
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: HAOS-Runner-*.zip
+          generate_release_notes: true
