@@ -108,7 +108,8 @@ final class SerialConsole: ObservableObject {
     private func startFlushing() {
         flushTimer?.invalidate()
         flushTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.flush() }
+            guard let self else { return }
+            Task { @MainActor in self.flush() }
         }
     }
 

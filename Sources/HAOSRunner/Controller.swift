@@ -79,7 +79,8 @@ final class Controller: NSObject, ObservableObject {
         transition(.stopping, timeout: 60)
         if vm.canStop {
             vm.stop { [weak self] _ in
-                Task { @MainActor in self?.machineDidStop(error: nil) }
+                guard let self else { return }
+                Task { @MainActor in self.machineDidStop(error: nil) }
             }
         } else {
             machineDidStop(error: nil)
@@ -141,7 +142,8 @@ final class Controller: NSObject, ObservableObject {
                 if !DiskBuilder.hasSource {
                     transition(.starting(.downloadingImage(percent: nil)), timeout: 3600)
                     _ = try await ImageDownloader.downloadLatest { [weak self] percent in
-                        Task { @MainActor in self?.updateImageDownloadPercent(percent) }
+                        guard let self else { return }
+                        Task { @MainActor in self.updateImageDownloadPercent(percent) }
                     }
                 }
                 transition(.starting(.preparingDisk), timeout: 600)

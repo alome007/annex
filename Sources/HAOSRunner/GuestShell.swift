@@ -53,7 +53,8 @@ final class GuestShell {
         stage = .seekingPrompt
         lastActionAt = .now
         nudge = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.nudgeIfStalled() }
+            guard let self else { return }
+            Task { @MainActor in self.nudgeIfStalled() }
         }
     }
 
