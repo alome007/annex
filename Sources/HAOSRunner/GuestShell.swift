@@ -22,9 +22,15 @@ enum GuestNetwork {
 
     static func repairCommand(gateway: String) -> String {
         "docker exec hassio_cli ha dns options --servers dns://\(gateway); "
-            + "docker exec hassio_cli ha dns restart; "
+            + "docker restart hassio_dns; "
             + "docker exec hassio_cli ha supervisor reload"
     }
+
+    /// Supervisor decides it has no internet from a single short-timeout request
+    /// and then declines to fetch the version Core is installed from. On a slow
+    /// link that check loses the race repeatedly, and nothing retries it hard
+    /// enough — so nudge it until one attempt succeeds.
+    static let nudgeCommand = "docker exec hassio_cli ha supervisor reload"
 }
 
 @MainActor

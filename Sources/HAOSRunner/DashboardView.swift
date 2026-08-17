@@ -321,7 +321,7 @@ private struct StageRow: View {
             "Unpacking the image into a working disk."
         case .waitingForHomeAssistant(let percent):
             if guestOffline {
-                "The machine cannot reach the internet, so Home Assistant cannot download. Repairing its network settings."
+                "The machine's connection is too slow or unstable for Home Assistant's download check. Retrying — this can take a while."
             } else if let percent, downloadRegressed {
                 "Downloading Home Assistant — \(percent)% (connection unstable, download restarted)"
             } else if let percent {

@@ -315,11 +315,18 @@ final class Controller: NSObject, ObservableObject {
     private func startProgressPolling() {
         progressPoll?.cancel()
         progressPoll = Task { [weak self] in
+            var ticks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
-                guard case .starting(.waitingForHomeAssistant) = self.state, self.shell.isAtShell else { continue }
-                self.console.send(SupervisorProbe.progressCommand)
+                guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, self.shell.isAtShell else { continue }
+                ticks += 1
+                if percent == nil, ticks % 18 == 0 {
+                    self.log.notice("nudging Supervisor to retry its version fetch")
+                    self.shell.run(GuestNetwork.nudgeCommand)
+                } else {
+                    self.console.send(SupervisorProbe.progressCommand)
+                }
             }
         }
     }
