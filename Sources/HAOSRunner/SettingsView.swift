@@ -58,18 +58,24 @@ struct SettingsView: View {
                     }
                     Button("Choose…") { ImagePicker.chooseSourceImage(controller: controller) }
                 }
-                if Paths.sourceImage == nil, !controller.availableReleases.isEmpty {
+                if Paths.sourceImage == nil {
                     HStack {
                         Text("Version to install")
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.ink)
                         Spacer()
-                        VersionMenu()
+                        if controller.availableReleases.isEmpty {
+                            Text("Checking…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.faint)
+                        } else {
+                            VersionMenu()
+                        }
                     }
                 }
                 Button("Erase and start over") { confirmingErase = true }
                     .disabled(!controller.canErase)
-                Text("Rebuilds the machine from the source image. Everything in the current one is lost.")
+                Text("Deletes this machine and returns to the install screen, where you can pick a version. Everything in the current machine is lost.")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.faint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -77,15 +83,23 @@ struct SettingsView: View {
         }
         .padding(16)
         .frame(width: 320)
+        .task { controller.refreshReleases() }
         .confirmationDialog(
-            "Erase this machine and install again?",
+            "Erase this machine?",
             isPresented: $confirmingErase,
             titleVisibility: .visible
         ) {
-            Button("Erase and start over", role: .destructive) { controller.eraseAndReinstall() }
+            Button("Erase", role: .destructive) {
+                controller.erase(deletingDownloadedImage: false)
+            }
+            if controller.hasDownloadedImage {
+                Button("Erase and re-download the image", role: .destructive) {
+                    controller.erase(deletingDownloadedImage: true)
+                }
+            }
             Button("Keep it", role: .cancel) {}
         } message: {
-            Text("Home Assistant's configuration, history and settings in this machine are deleted.")
+            Text("Home Assistant's configuration, history and settings in this machine are deleted. You return to the install screen, where you can pick a version.")
         }
     }
 

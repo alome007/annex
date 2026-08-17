@@ -14,6 +14,7 @@ final class Controller: NSObject, ObservableObject {
     @Published private(set) var availableReleases: [HAOSRelease] = []
     @Published var selectedVersion: String?
     @Published private(set) var coreDownloadRegressed = false
+    @Published private(set) var hasDisk = Paths.hasWorkingDisk
     @Published var settings = VMSettings.load() {
         didSet { settings.save() }
     }
@@ -34,12 +35,14 @@ final class Controller: NSObject, ObservableObject {
         super.init()
         console.onLine = { [weak self] line in self?.handleConsoleLine(line) }
         console.onTail = { [weak self] tail in self?.shell.handleTail(tail) }
-        if !Paths.hasWorkingDisk {
-            refreshReleases()
-        }
+        refreshReleases()
         if settings.startOnLaunch {
             Task { @MainActor in self.start() }
         }
+    }
+
+    func refreshDiskPresence() {
+        hasDisk = Paths.hasWorkingDisk
     }
 
     func refreshReleases() {
@@ -50,7 +53,8 @@ final class Controller: NSObject, ObservableObject {
     }
 
     var machineIsActive: Bool { machine != nil }
-    var canErase: Bool { machine == nil && DiskBuilder.hasSource }
+    var canErase: Bool { machine == nil && Paths.hasWorkingDisk }
+    var hasDownloadedImage: Bool { ImageDownloader.cachedArchive != nil }
 
     func noteSettingsChanged() {
         objectWillChange.send()
@@ -132,19 +136,24 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
-    func eraseAndReinstall() {
+    func erase(deletingDownloadedImage: Bool) {
         guard machine == nil else { return }
+        pipeline?.cancel()
+        pipeline = nil
         SavedSession.discard()
         console.clear()
-        pipeline = Task {
-            transition(.starting(.preparingDisk), timeout: 600)
-            do {
-                try await DiskBuilder.rebuild()
-                transition(.ready)
-            } catch {
-                fail(error.localizedDescription)
-            }
+        try? FileManager.default.removeItem(at: Paths.diskImage)
+        try? FileManager.default.removeItem(at: Paths.efiStore)
+        if deletingDownloadedImage, let archive = ImageDownloader.cachedArchive {
+            try? FileManager.default.removeItem(at: archive)
         }
+        offerBootRepair = false
+        coreDownloadRegressed = false
+        bootStartedAt = nil
+        log.notice("erased machine (image kept: \(!deletingDownloadedImage, privacy: .public))")
+        refreshDiskPresence()
+        transition(.ready)
+        refreshReleases()
     }
 
     // MARK: - Boot pipeline
@@ -168,6 +177,7 @@ final class Controller: NSObject, ObservableObject {
                 }
                 transition(.starting(.preparingDisk), timeout: 600)
                 try await DiskBuilder.rebuild()
+                refreshDiskPresence()
             }
 
             transition(.starting(.startingMachine), timeout: 60)

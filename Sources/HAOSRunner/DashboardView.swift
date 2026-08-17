@@ -23,6 +23,7 @@ struct DashboardView: View {
         }
         .background(Theme.page)
         .frame(minWidth: 640, minHeight: 520)
+        .task { controller.refreshReleases() }
         .onChange(of: controller.state) { _, newState in
             if case .failed = newState {
                 consoleOpen = true
@@ -62,12 +63,12 @@ struct DashboardView: View {
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(StateDescription.headline(for: controller.state, hasDisk: Paths.hasWorkingDisk))
+                Text(StateDescription.headline(for: controller.state, hasDisk: controller.hasDisk))
                     .font(.system(size: 24, weight: .semibold))
                     .tracking(-0.5)
                     .foregroundStyle(Theme.ink)
                 if !detailIsError {
-                    Text(StateDescription.detail(for: controller.state, hasDisk: Paths.hasWorkingDisk))
+                    Text(StateDescription.detail(for: controller.state, hasDisk: controller.hasDisk))
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -102,9 +103,9 @@ struct DashboardView: View {
         HStack(spacing: 10) {
             switch controller.state {
             case .ready, .stopped:
-                Button(Paths.hasWorkingDisk ? "Start Home Assistant" : "Install Home Assistant") { controller.start() }
+                Button(controller.hasDisk ? "Start Home Assistant" : "Install Home Assistant") { controller.start() }
                     .buttonStyle(PrimaryButtonStyle())
-                if !Paths.hasWorkingDisk, !controller.availableReleases.isEmpty {
+                if !controller.hasDisk, !controller.availableReleases.isEmpty {
                     VersionMenu()
                 }
             case .starting:
