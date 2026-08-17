@@ -44,7 +44,7 @@ struct DashboardView: View {
             SettingsButton()
         }
         .padding(.horizontal, 24)
-        .padding(.top, 40)
+        .padding(.top, 28)
         .padding(.bottom, 4)
     }
 
