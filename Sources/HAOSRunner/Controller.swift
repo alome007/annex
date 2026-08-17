@@ -292,7 +292,7 @@ final class Controller: NSObject, ObservableObject {
         progressPoll?.cancel()
         progressPoll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
+                try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
                 guard case .starting(.waitingForHomeAssistant) = self.state, self.shell.isAtShell else { continue }
                 self.console.send(RelayInstall.supervisorProgressCommand)

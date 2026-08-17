@@ -246,9 +246,17 @@ private struct StageRow: View {
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.secondary)
                 }
-                if status == .active, let percent = activePercent {
-                    ProgressBar(fraction: Double(percent) / 100)
-                        .padding(.top, 2)
+                if status == .active, showsProgressBar {
+                    if let percent = activePercent {
+                        ProgressBar(fraction: Double(percent) / 100)
+                            .padding(.top, 2)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .controlSize(.small)
+                            .frame(width: 220)
+                            .padding(.top, 2)
+                    }
                 }
             }
             .padding(.bottom, isLast ? 0 : 16)
@@ -275,6 +283,13 @@ private struct StageRow: View {
         case .done: Theme.secondary
         case .active: Theme.ink
         case .pending: Theme.faint
+        }
+    }
+
+    private var showsProgressBar: Bool {
+        switch current {
+        case .downloadingImage, .waitingForHomeAssistant: true
+        default: false
         }
     }
 
