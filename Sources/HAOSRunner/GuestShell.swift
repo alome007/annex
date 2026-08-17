@@ -5,11 +5,11 @@ enum RelayInstall {
     static let port = 9999
     static let containerName = "harelay"
 
-    static var command: String {
+    static func command(corePort: Int) -> String {
         "for i in 1 2 3 4 5; do docker pull alpine/socat && break; sleep 6; done; "
             + "docker rm -f \(containerName) 2>/dev/null; "
             + "docker run -d --network host --restart unless-stopped --name \(containerName) "
-            + "alpine/socat TCP-LISTEN:\(port),fork,reuseaddr TCP:127.0.0.1:80"
+            + "alpine/socat TCP-LISTEN:\(port),fork,reuseaddr TCP:127.0.0.1:\(corePort)"
     }
 
     static let supervisorProgressCommand =

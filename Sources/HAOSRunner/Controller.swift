@@ -194,12 +194,13 @@ final class Controller: NSObject, ObservableObject {
 
             transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: 2400)
             startProgressPolling()
-            try await awaitProbe { await HTTPProbe.coreAnswers(ip: ip) }
+            let corePort = try await awaitCorePort(ip: ip)
             stopProgressPolling()
+            log.notice("Home Assistant answering on port \(corePort, privacy: .public)")
 
             transition(.starting(.connectingBridge), timeout: 300)
             if await !HTTPProbe.relayAnswers(ip: ip) {
-                shell.run(RelayInstall.command)
+                shell.run(RelayInstall.command(corePort: corePort))
                 try await awaitProbe { await HTTPProbe.relayAnswers(ip: ip) }
             }
 
@@ -285,6 +286,14 @@ final class Controller: NSObject, ObservableObject {
             try Task.checkCancellation()
             if let ip = await GuestAddressResolver.resolve(mac: mac) { return ip }
             try await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    private func awaitCorePort(ip: String) async throws -> Int {
+        while true {
+            try Task.checkCancellation()
+            if let port = await HTTPProbe.coreServingPort(ip: ip) { return port }
+            try await Task.sleep(for: .seconds(1.5))
         }
     }
 

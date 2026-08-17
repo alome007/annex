@@ -25,10 +25,18 @@ enum HTTPProbe {
         return http.statusCode
     }
 
-    static func coreAnswers(ip: String) async -> Bool {
-        guard let url = URL(string: "http://\(ip)/api/") else { return false }
-        let status = await status(of: url)
-        return status == 200 || status == 401
+    static let corePorts = [8123, 80]
+
+    static func coreAnswers(status: Int?) -> Bool {
+        status == 200 || status == 401
+    }
+
+    static func coreServingPort(ip: String) async -> Int? {
+        for port in corePorts {
+            guard let url = URL(string: "http://\(ip):\(port)/api/") else { continue }
+            if coreAnswers(status: await status(of: url)) { return port }
+        }
+        return nil
     }
 
     static func relayAnswers(ip: String) async -> Bool {
