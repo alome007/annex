@@ -17,11 +17,19 @@ final class GuestNetworkTests: XCTestCase {
         let command = GuestNetwork.repairCommand(gateway: "192.168.64.1")
         XCTAssertTrue(command.contains("ha dns options --servers dns://192.168.64.1"))
         XCTAssertTrue(command.contains("docker restart hassio_dns"))
-        XCTAssertTrue(command.contains("ha supervisor reload"))
+        XCTAssertTrue(command.contains("docker restart hassio_supervisor"))
     }
 
-    func testNudgeAsksSupervisorToRetry() {
-        XCTAssertTrue(GuestNetwork.nudgeCommand.contains("ha supervisor reload"))
+    func testRepairSurvivesAStoppedCLIContainer() {
+        let command = GuestNetwork.repairCommand(gateway: "192.168.64.1")
+        XCTAssertTrue(command.contains("docker start hassio_cli"))
+        XCTAssertTrue(command.contains("|| true"))
+    }
+
+    func testNudgeFallsBackToRestartingSupervisorWithoutTheCLI() {
+        let command = GuestNetwork.nudgeCommand
+        XCTAssertTrue(command.contains("ha supervisor reload"))
+        XCTAssertTrue(command.contains("|| docker restart hassio_supervisor"))
     }
 }
 

@@ -20,17 +20,25 @@ enum GuestNetwork {
         return octets.dropLast().joined(separator: ".") + ".1"
     }
 
+    /// `hassio_cli` is not always running, so every `docker exec hassio_cli ha …`
+    /// can fail outright. Each step is therefore best-effort, the CLI is started
+    /// first, and the parts that matter — the resolver and Supervisor itself —
+    /// are driven through docker, which is always available on the host.
     static func repairCommand(gateway: String) -> String {
-        "docker exec hassio_cli ha dns options --servers dns://\(gateway); "
-            + "docker restart hassio_dns; "
-            + "docker exec hassio_cli ha supervisor reload"
+        "docker start hassio_cli >/dev/null 2>&1; "
+            + "docker exec hassio_cli ha dns options --servers dns://\(gateway) || true; "
+            + "docker restart hassio_dns >/dev/null; "
+            + "docker restart hassio_supervisor >/dev/null"
     }
 
     /// Supervisor decides it has no internet from a single short-timeout request
     /// and then declines to fetch the version Core is installed from. On a slow
     /// link that check loses the race repeatedly, and nothing retries it hard
-    /// enough — so nudge it until one attempt succeeds.
-    static let nudgeCommand = "docker exec hassio_cli ha supervisor reload"
+    /// enough — so nudge it until one attempt succeeds, gently if the CLI is up
+    /// and by restarting Supervisor if it is not.
+    static let nudgeCommand =
+        "docker start hassio_cli >/dev/null 2>&1; "
+            + "docker exec hassio_cli ha supervisor reload || docker restart hassio_supervisor >/dev/null"
 }
 
 @MainActor
