@@ -11,6 +11,8 @@ final class Controller: NSObject, ObservableObject {
     @Published private(set) var bootStartedAt: Date?
     @Published private(set) var freshInstall = false
     @Published private(set) var offerBootRepair = false
+    @Published private(set) var availableReleases: [HAOSRelease] = []
+    @Published var selectedVersion: String?
     @Published var settings = VMSettings.load() {
         didSet { settings.save() }
     }
@@ -31,8 +33,18 @@ final class Controller: NSObject, ObservableObject {
         super.init()
         console.onLine = { [weak self] line in self?.handleConsoleLine(line) }
         console.onTail = { [weak self] tail in self?.shell.handleTail(tail) }
+        if !Paths.hasWorkingDisk {
+            refreshReleases()
+        }
         if settings.startOnLaunch {
             Task { @MainActor in self.start() }
+        }
+    }
+
+    func refreshReleases() {
+        Task { [weak self] in
+            guard let releases = try? await ImageDownloader.fetchReleases() else { return }
+            await MainActor.run { self?.availableReleases = releases }
         }
     }
 
@@ -141,7 +153,13 @@ final class Controller: NSObject, ObservableObject {
             if !Paths.hasWorkingDisk {
                 if !DiskBuilder.hasSource {
                     transition(.starting(.downloadingImage(percent: nil)), timeout: 3600)
-                    _ = try await ImageDownloader.downloadLatest { [weak self] percent in
+                    let releases = try await ImageDownloader.fetchReleases()
+                    availableReleases = releases
+                    guard let release = releases.first(where: { $0.version == selectedVersion }) ?? releases.first else {
+                        throw ImageDownloadError.assetMissing
+                    }
+                    log.notice("downloading HAOS \(release.version, privacy: .public)")
+                    _ = try await ImageDownloader.download(release: release) { [weak self] percent in
                         guard let self else { return }
                         Task { @MainActor in self.updateImageDownloadPercent(percent) }
                     }

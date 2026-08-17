@@ -103,6 +103,9 @@ struct DashboardView: View {
             case .ready, .stopped:
                 Button(Paths.hasWorkingDisk ? "Start Home Assistant" : "Install Home Assistant") { controller.start() }
                     .buttonStyle(PrimaryButtonStyle())
+                if !Paths.hasWorkingDisk, !controller.availableReleases.isEmpty {
+                    VersionMenu()
+                }
             case .starting:
                 Button("Force stop") { controller.forceStop() }
                     .buttonStyle(QuietButtonStyle())
@@ -366,6 +369,37 @@ private struct ErrorBlock: View {
         .padding(.vertical, 12)
         .background(Theme.inset)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct VersionMenu: View {
+    @EnvironmentObject private var controller: Controller
+
+    var body: some View {
+        Menu {
+            ForEach(controller.availableReleases) { release in
+                Button {
+                    controller.selectedVersion = release.version
+                } label: {
+                    if selectedLabel == release.version {
+                        Label(release.version, systemImage: "checkmark")
+                    } else {
+                        Text(release.version)
+                    }
+                }
+            }
+        } label: {
+            Text("Version \(selectedLabel)")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Which Home Assistant OS release to install")
+    }
+
+    private var selectedLabel: String {
+        controller.selectedVersion ?? controller.availableReleases.first?.version ?? "latest"
     }
 }
 

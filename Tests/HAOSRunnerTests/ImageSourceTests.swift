@@ -17,23 +17,27 @@ final class ImageAssetMatchingTests: XCTestCase {
         XCTAssertNil(ImageDownloader.imageAssetName(inReleaseAssetNames: ["haos_ova-18.2.qcow2.xz", "notes.txt"]))
     }
 
-    func testExtractsVersionFromRedirectLocation() {
-        XCTAssertEqual(
-            ImageDownloader.versionTag(fromRedirectLocation: "https://github.com/home-assistant/operating-system/releases/tag/18.2"),
-            "18.2"
-        )
+    func testDecodesReleaseListKeepingOnlyStableAarch64Releases() throws {
+        let json = """
+        [
+          {"tag_name": "19.0.rc1", "prerelease": true,
+           "assets": [{"name": "haos_generic-aarch64-19.0.rc1.img.xz", "browser_download_url": "https://example.com/rc.img.xz"}]},
+          {"tag_name": "18.2", "prerelease": false,
+           "assets": [{"name": "haos_generic-aarch64-18.2.qcow2.xz", "browser_download_url": "https://example.com/18.2.qcow2.xz"},
+                      {"name": "haos_generic-aarch64-18.2.img.xz", "browser_download_url": "https://example.com/18.2.img.xz"}]},
+          {"tag_name": "18.1", "prerelease": false, "assets": [{"name": "notes.txt", "browser_download_url": "https://example.com/notes.txt"}]},
+          {"tag_name": "18.0", "prerelease": false,
+           "assets": [{"name": "haos_generic-aarch64-18.0.img.xz", "browser_download_url": "https://example.com/18.0.img.xz"}]}
+        ]
+        """
+        let releases = try XCTUnwrap(ImageDownloader.releases(fromJSON: Data(json.utf8)))
+        XCTAssertEqual(releases.map(\.version), ["18.2", "18.0"])
+        XCTAssertEqual(releases.first?.assetName, "haos_generic-aarch64-18.2.img.xz")
+        XCTAssertEqual(releases.first?.assetURL.absoluteString, "https://example.com/18.2.img.xz")
     }
 
-    func testRejectsUnexpectedRedirectLocations() {
-        XCTAssertNil(ImageDownloader.versionTag(fromRedirectLocation: "https://github.com/home-assistant/operating-system/releases"))
-        XCTAssertNil(ImageDownloader.versionTag(fromRedirectLocation: "not a url at all ::"))
-    }
-
-    func testBuildsDeterministicImageURL() {
-        XCTAssertEqual(
-            ImageDownloader.imageURL(forVersion: "18.2")?.absoluteString,
-            "https://github.com/home-assistant/operating-system/releases/download/18.2/haos_generic-aarch64-18.2.img.xz"
-        )
+    func testReleaseDecodeRejectsMalformedJSON() {
+        XCTAssertNil(ImageDownloader.releases(fromJSON: Data("not json".utf8)))
     }
 }
 

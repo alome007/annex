@@ -1,6 +1,14 @@
 import Compression
 import Foundation
 
+struct HAOSRelease: Equatable, Identifiable {
+    let version: String
+    let assetName: String
+    let assetURL: URL
+
+    var id: String { version }
+}
+
 enum ImageDownloadError: LocalizedError {
     case releaseLookupFailed(String)
     case assetMissing
@@ -10,10 +18,10 @@ enum ImageDownloadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .releaseLookupFailed(let detail):
-            "Could not look up the latest Home Assistant OS release: \(detail) "
+            "Could not fetch the Home Assistant OS releases: \(detail) "
                 + "Check your internet connection and start again, or pick an image manually in settings."
         case .assetMissing:
-            "The latest Home Assistant OS release has no generic-aarch64 image. Pick one manually in settings."
+            "No matching Home Assistant OS release with a generic-aarch64 image was found. Pick an image manually in settings."
         case .downloadFailed(let detail):
             "The image download failed: \(detail) Start again to retry, or pick an image manually in settings."
         case .decompressionFailed:
@@ -23,22 +31,10 @@ enum ImageDownloadError: LocalizedError {
 }
 
 enum ImageDownloader {
-    static let latestReleaseURL = URL(string: "https://github.com/home-assistant/operating-system/releases/latest")!
+    static let releasesAPI = URL(string: "https://api.github.com/repos/home-assistant/operating-system/releases?per_page=20")!
 
     static func imageAssetName(inReleaseAssetNames names: [String]) -> String? {
         names.first { $0.hasPrefix("haos_generic-aarch64-") && $0.hasSuffix(".img.xz") }
-    }
-
-    static func versionTag(fromRedirectLocation location: String) -> String? {
-        guard let url = URL(string: location),
-              url.pathComponents.count >= 2,
-              url.pathComponents.dropLast().last == "tag" else { return nil }
-        let tag = url.lastPathComponent
-        return tag.isEmpty ? nil : tag
-    }
-
-    static func imageURL(forVersion version: String) -> URL? {
-        URL(string: "https://github.com/home-assistant/operating-system/releases/download/\(version)/haos_generic-aarch64-\(version).img.xz")
     }
 
     static var cachedArchive: URL? {
@@ -51,54 +47,72 @@ enum ImageDownloader {
             .first
     }
 
-    static func downloadLatest(progress: @escaping @Sendable (Int) -> Void) async throws -> URL {
-        let asset = try await latestImageAsset()
+    static func releases(fromJSON data: Data) -> [HAOSRelease]? {
+        struct APIRelease: Decodable {
+            struct APIAsset: Decodable {
+                let name: String
+                let browser_download_url: URL
+            }
+            let tag_name: String
+            let prerelease: Bool
+            let assets: [APIAsset]
+        }
+        guard let decoded = try? JSONDecoder().decode([APIRelease].self, from: data) else { return nil }
+        return decoded.compactMap { release in
+            guard !release.prerelease,
+                  let assetName = imageAssetName(inReleaseAssetNames: release.assets.map(\.name)),
+                  let asset = release.assets.first(where: { $0.name == assetName }) else { return nil }
+            return HAOSRelease(version: release.tag_name, assetName: assetName, assetURL: asset.browser_download_url)
+        }
+    }
+
+    static func fetchReleases() async throws -> [HAOSRelease] {
+        var request = URLRequest(url: releasesAPI)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        if let etag = ReleaseCache.etag {
+            request.setValue(etag, forHTTPHeaderField: "If-None-Match")
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            if let cached = ReleaseCache.load() { return cached }
+            throw ImageDownloadError.releaseLookupFailed(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw ImageDownloadError.releaseLookupFailed("Unexpected response.")
+        }
+        switch http.statusCode {
+        case 200:
+            guard let releases = releases(fromJSON: data), !releases.isEmpty else {
+                throw ImageDownloadError.assetMissing
+            }
+            ReleaseCache.store(data: data, etag: http.value(forHTTPHeaderField: "ETag"))
+            return releases
+        case 304:
+            guard let cached = ReleaseCache.load() else {
+                ReleaseCache.clear()
+                throw ImageDownloadError.releaseLookupFailed("The release cache is missing.")
+            }
+            return cached
+        default:
+            if let cached = ReleaseCache.load() { return cached }
+            throw ImageDownloadError.releaseLookupFailed("GitHub answered with status \(http.statusCode).")
+        }
+    }
+
+    static func download(release: HAOSRelease, progress: @escaping @Sendable (Int) -> Void) async throws -> URL {
         try Paths.ensureSupportDirectory()
-        let destination = Paths.support.appending(path: asset.name)
-        let temporary = try await Downloader().download(from: asset.url, progress: progress)
+        let destination = Paths.support.appending(path: release.assetName)
+        let temporary = try await Downloader().download(from: release.assetURL, progress: progress)
         if let stale = cachedArchive {
             try? FileManager.default.removeItem(at: stale)
         }
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: temporary, to: destination)
         return destination
-    }
-
-    private struct Asset {
-        let name: String
-        let url: URL
-    }
-
-    private final class RedirectCapture: NSObject, URLSessionTaskDelegate {
-        func urlSession(
-            _ session: URLSession,
-            task: URLSessionTask,
-            willPerformHTTPRedirection response: HTTPURLResponse,
-            newRequest request: URLRequest
-        ) async -> URLRequest? {
-            nil
-        }
-    }
-
-    private static func latestImageAsset() async throws -> Asset {
-        let session = URLSession(configuration: .ephemeral, delegate: RedirectCapture(), delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        let response: URLResponse
-        do {
-            (_, response) = try await session.data(from: latestReleaseURL)
-        } catch {
-            throw ImageDownloadError.releaseLookupFailed(error.localizedDescription)
-        }
-        guard let http = response as? HTTPURLResponse,
-              (300..<400).contains(http.statusCode),
-              let location = http.value(forHTTPHeaderField: "Location"),
-              let version = versionTag(fromRedirectLocation: location) else {
-            throw ImageDownloadError.releaseLookupFailed("GitHub did not report a latest release.")
-        }
-        guard let url = imageURL(forVersion: version) else {
-            throw ImageDownloadError.assetMissing
-        }
-        return Asset(name: url.lastPathComponent, url: url)
     }
 
     static func decompress(archive: URL, to output: URL) throws {
@@ -121,6 +135,30 @@ enum ImageDownloader {
         } catch {
             try? FileManager.default.removeItem(at: output)
             throw ImageDownloadError.decompressionFailed
+        }
+    }
+
+    private enum ReleaseCache {
+        private static let etagKey = "releaseListETag"
+        private static var file: URL { Paths.support.appending(path: "releases-cache.json") }
+
+        static var etag: String? { Persistence.defaults.string(forKey: etagKey) }
+
+        static func store(data: Data, etag: String?) {
+            try? Paths.ensureSupportDirectory()
+            try? data.write(to: file)
+            Persistence.defaults.set(etag, forKey: etagKey)
+        }
+
+        static func load() -> [HAOSRelease]? {
+            guard let data = try? Data(contentsOf: file),
+                  let releases = releases(fromJSON: data), !releases.isEmpty else { return nil }
+            return releases
+        }
+
+        static func clear() {
+            try? FileManager.default.removeItem(at: file)
+            Persistence.defaults.removeObject(forKey: etagKey)
         }
     }
 
