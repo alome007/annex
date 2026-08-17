@@ -13,6 +13,7 @@ final class Controller: NSObject, ObservableObject {
     @Published private(set) var offerBootRepair = false
     @Published private(set) var availableReleases: [HAOSRelease] = []
     @Published var selectedVersion: String?
+    @Published private(set) var coreDownloadRegressed = false
     @Published var settings = VMSettings.load() {
         didSet { settings.save() }
     }
@@ -60,6 +61,7 @@ final class Controller: NSObject, ObservableObject {
     func start() {
         guard machine == nil, !state.isBusy else { return }
         offerBootRepair = false
+        coreDownloadRegressed = false
         console.clear()
         try? Paths.ensureSupportDirectory()
         console.beginFileLog(at: Paths.support.appending(path: "console.log"))
@@ -151,7 +153,7 @@ final class Controller: NSObject, ObservableObject {
         do {
             freshInstall = !Paths.hasWorkingDisk
             if !Paths.hasWorkingDisk {
-                if !DiskBuilder.hasSource {
+                if needsImageDownload {
                     transition(.starting(.downloadingImage(percent: nil)), timeout: 3600)
                     let releases = try await ImageDownloader.fetchReleases()
                     availableReleases = releases
@@ -303,6 +305,13 @@ final class Controller: NSObject, ObservableObject {
         progressPoll = nil
     }
 
+    private var needsImageDownload: Bool {
+        guard Paths.sourceImage == nil else { return false }
+        guard let cached = ImageDownloader.cachedArchive else { return true }
+        guard let version = selectedVersion else { return false }
+        return !cached.lastPathComponent.contains("-\(version).img.xz")
+    }
+
     private func updateImageDownloadPercent(_ percent: Int) {
         guard case .starting(.downloadingImage(let current)) = state, percent != current else { return }
         transition(.starting(.downloadingImage(percent: percent)), timeout: 3600)
@@ -313,6 +322,9 @@ final class Controller: NSObject, ObservableObject {
         guard case .starting(.waitingForHomeAssistant(let current)) = state,
               let percent = SupervisorLog.downloadPercent(in: line),
               percent != current else { return }
+        if let current, percent < current - 2 {
+            coreDownloadRegressed = true
+        }
         transition(.starting(.waitingForHomeAssistant(downloadPercent: percent)), timeout: 2400)
     }
 

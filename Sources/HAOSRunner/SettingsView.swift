@@ -58,6 +58,15 @@ struct SettingsView: View {
                     }
                     Button("Choose…") { ImagePicker.chooseSourceImage(controller: controller) }
                 }
+                if Paths.sourceImage == nil, !controller.availableReleases.isEmpty {
+                    HStack {
+                        Text("Version to install")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.ink)
+                        Spacer()
+                        VersionMenu()
+                    }
+                }
                 Button("Erase and start over") { confirmingErase = true }
                     .disabled(!controller.canErase)
                 Text("Rebuilds the machine from the source image. Everything in the current one is lost.")

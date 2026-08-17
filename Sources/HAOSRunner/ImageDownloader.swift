@@ -5,6 +5,7 @@ struct HAOSRelease: Equatable, Identifiable {
     let version: String
     let assetName: String
     let assetURL: URL
+    let notesURL: URL?
 
     var id: String { version }
 }
@@ -55,6 +56,7 @@ enum ImageDownloader {
             }
             let tag_name: String
             let prerelease: Bool
+            let html_url: URL?
             let assets: [APIAsset]
         }
         guard let decoded = try? JSONDecoder().decode([APIRelease].self, from: data) else { return nil }
@@ -62,7 +64,12 @@ enum ImageDownloader {
             guard !release.prerelease,
                   let assetName = imageAssetName(inReleaseAssetNames: release.assets.map(\.name)),
                   let asset = release.assets.first(where: { $0.name == assetName }) else { return nil }
-            return HAOSRelease(version: release.tag_name, assetName: assetName, assetURL: asset.browser_download_url)
+            return HAOSRelease(
+                version: release.tag_name,
+                assetName: assetName,
+                assetURL: asset.browser_download_url,
+                notesURL: release.html_url
+            )
         }
     }
 

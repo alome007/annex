@@ -78,7 +78,8 @@ struct DashboardView: View {
                 BootChecklist(
                     current: stage,
                     bootStartedAt: controller.bootStartedAt,
-                    freshInstall: controller.freshInstall
+                    freshInstall: controller.freshInstall,
+                    downloadRegressed: controller.coreDownloadRegressed
                 )
             }
             if case .running(let url) = controller.state {
@@ -151,6 +152,7 @@ private struct BootChecklist: View {
     let current: BootStage
     let bootStartedAt: Date?
     let freshInstall: Bool
+    let downloadRegressed: Bool
 
     private var rows: [BootStage] {
         let standard: [BootStage] = [
@@ -188,6 +190,7 @@ private struct BootChecklist: View {
                     stage: row,
                     current: current,
                     freshInstall: freshInstall,
+                    downloadRegressed: downloadRegressed,
                     isLast: index == rows.count - 1
                 )
             }
@@ -209,6 +212,7 @@ private struct StageRow: View {
     let stage: BootStage
     let current: BootStage
     let freshInstall: Bool
+    let downloadRegressed: Bool
     let isLast: Bool
 
     private enum Status { case done, active, pending }
@@ -293,7 +297,9 @@ private struct StageRow: View {
         case .preparingDisk:
             "Unpacking the image into a working disk."
         case .waitingForHomeAssistant(let percent):
-            if let percent {
+            if let percent, downloadRegressed {
+                "Downloading Home Assistant — \(percent)% (connection unstable, download restarted)"
+            } else if let percent {
                 "Downloading Home Assistant — \(percent)%"
             } else if freshInstall {
                 "Downloading Home Assistant. This can take 10–20 minutes."
@@ -372,7 +378,7 @@ private struct ErrorBlock: View {
     }
 }
 
-private struct VersionMenu: View {
+struct VersionMenu: View {
     @EnvironmentObject private var controller: Controller
 
     var body: some View {
@@ -388,6 +394,12 @@ private struct VersionMenu: View {
                     }
                 }
             }
+            if let notesURL = selectedRelease?.notesURL {
+                Divider()
+                Button("Release notes for \(selectedLabel)…") {
+                    NSWorkspace.shared.open(notesURL)
+                }
+            }
         } label: {
             Text("Version \(selectedLabel)")
                 .font(.system(size: 12))
@@ -398,8 +410,13 @@ private struct VersionMenu: View {
         .help("Which Home Assistant OS release to install")
     }
 
+    private var selectedRelease: HAOSRelease? {
+        controller.availableReleases.first { $0.version == controller.selectedVersion }
+            ?? controller.availableReleases.first
+    }
+
     private var selectedLabel: String {
-        controller.selectedVersion ?? controller.availableReleases.first?.version ?? "latest"
+        selectedRelease?.version ?? "latest"
     }
 }
 

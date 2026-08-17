@@ -21,8 +21,8 @@ final class ImageAssetMatchingTests: XCTestCase {
         let json = """
         [
           {"tag_name": "19.0.rc1", "prerelease": true,
-           "assets": [{"name": "haos_generic-aarch64-19.0.rc1.img.xz", "browser_download_url": "https://example.com/rc.img.xz"}]},
-          {"tag_name": "18.2", "prerelease": false,
+           "html_url": "https://github.com/home-assistant/operating-system/releases/tag/19.0.rc1", "assets": [{"name": "haos_generic-aarch64-19.0.rc1.img.xz", "browser_download_url": "https://example.com/rc.img.xz"}]},
+          {"tag_name": "18.2", "prerelease": false, "html_url": "https://github.com/home-assistant/operating-system/releases/tag/18.2",
            "assets": [{"name": "haos_generic-aarch64-18.2.qcow2.xz", "browser_download_url": "https://example.com/18.2.qcow2.xz"},
                       {"name": "haos_generic-aarch64-18.2.img.xz", "browser_download_url": "https://example.com/18.2.img.xz"}]},
           {"tag_name": "18.1", "prerelease": false, "assets": [{"name": "notes.txt", "browser_download_url": "https://example.com/notes.txt"}]},
@@ -34,6 +34,11 @@ final class ImageAssetMatchingTests: XCTestCase {
         XCTAssertEqual(releases.map(\.version), ["18.2", "18.0"])
         XCTAssertEqual(releases.first?.assetName, "haos_generic-aarch64-18.2.img.xz")
         XCTAssertEqual(releases.first?.assetURL.absoluteString, "https://example.com/18.2.img.xz")
+        XCTAssertEqual(
+            releases.first?.notesURL?.absoluteString,
+            "https://github.com/home-assistant/operating-system/releases/tag/18.2"
+        )
+        XCTAssertNil(releases.last?.notesURL)
     }
 
     func testReleaseDecodeRejectsMalformedJSON() {
