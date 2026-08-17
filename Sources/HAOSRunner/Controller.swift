@@ -313,7 +313,7 @@ final class Controller: NSObject, ObservableObject {
     }
 
     private func updateImageDownloadPercent(_ percent: Int) {
-        guard case .starting(.downloadingImage(let current)) = state, percent != current else { return }
+        guard case .starting(.downloadingImage(let current)) = state, percent > (current ?? -1) else { return }
         transition(.starting(.downloadingImage(percent: percent)), timeout: 3600)
     }
 
