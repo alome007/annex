@@ -52,9 +52,10 @@ enum GuestPrompt: Equatable {
 
 enum SupervisorLog {
     static func reportsNoInternet(_ line: String) -> Bool {
-        line.contains("no supervisor internet connection")
-            || line.contains("No Supervisor connectivity")
-            || line.contains("has no Home Assistant version information")
+        let lowered = line.lowercased()
+        return lowered.contains("no supervisor internet")
+            || lowered.contains("no supervisor connectivity")
+            || lowered.contains("has no home assistant version")
     }
 
     static func downloadPercent(in line: String) -> Int? {

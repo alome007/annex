@@ -4,7 +4,8 @@ import os
 enum SupervisorProbe {
     static let progressCommand =
         "docker logs --since 2m hassio_supervisor 2>/dev/null | "
-            + "grep -E 'Core image|no supervisor internet connection|has no Home Assistant version' | tail -n 2"
+            + "grep -iE 'core image|supervisor connectivity|no supervisor internet|"
+            + "has no home assistant version' | tail -n 2"
 }
 
 /// Home Assistant OS resolves names with its own CoreDNS, which prefers

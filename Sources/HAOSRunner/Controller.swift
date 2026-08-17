@@ -31,6 +31,7 @@ final class Controller: NSObject, ObservableObject {
     private var watchdog: Task<Void, Never>?
     private var progressPoll: Task<Void, Never>?
     private var silenceWatch: Task<Void, Never>?
+    private var coreStallWatch: Task<Void, Never>?
     private var vmStateObservation: NSKeyValueObservation?
     private var quitCompletion: (() -> Void)?
 
@@ -201,8 +202,10 @@ final class Controller: NSObject, ObservableObject {
 
             transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: 2400)
             startProgressPolling()
+            startCoreStallWatch()
             let corePort = try await awaitCorePort(ip: ip)
             stopProgressPolling()
+            coreStallWatch?.cancel()
             log.notice("Home Assistant answering on port \(corePort, privacy: .public)")
 
             guard let url = URL(string: "http://\(ip):\(corePort)/") else {
@@ -356,6 +359,24 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
+    /// Supervisor only downloads Core once it believes it has internet. If a
+    /// boot loses that race — the network was down when the guest started —
+    /// it retries its version fetch forever without ever recovering DNS. Rather
+    /// than scrape its log for one of several wordings, treat "no Core after
+    /// three minutes" as the signal and repair once.
+    private func startCoreStallWatch() {
+        coreStallWatch?.cancel()
+        coreStallWatch = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(180))
+            guard !Task.isCancelled, let self else { return }
+            guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, percent == nil else { return }
+            guard self.networkRepairAttempts == 0 else { return }
+            self.guestOffline = true
+            self.log.notice("Core has not appeared after 3 minutes; repairing guest network")
+            self.repairGuestNetwork()
+        }
+    }
+
     /// Points the guest's resolver at the Mac's VM gateway, which forwards DNS
     /// reliably, then restarts the guest's DNS and Supervisor so the stalled
     /// Core download starts.
@@ -448,6 +469,8 @@ final class Controller: NSObject, ObservableObject {
         pipeline = nil
         silenceWatch?.cancel()
         silenceWatch = nil
+        coreStallWatch?.cancel()
+        coreStallWatch = nil
         stopProgressPolling()
         shell.reset()
     }
