@@ -13,7 +13,27 @@ enum RelayInstall {
     }
 
     static let supervisorProgressCommand =
-        "docker logs --since 2m hassio_supervisor 2>/dev/null | grep 'Core image' | tail -n 1"
+        "docker logs --since 2m hassio_supervisor 2>/dev/null | "
+            + "grep -E 'Core image|no supervisor internet connection|has no Home Assistant version' | tail -n 2"
+}
+
+/// Home Assistant OS resolves names with its own CoreDNS, which prefers
+/// DNS-over-TLS to public resolvers. Networks that block port 853 or those
+/// resolvers leave the guest with no usable DNS — Supervisor then reports no
+/// connectivity and never downloads Core. The Mac's own VM gateway forwards
+/// DNS reliably, so pointing the guest at it is the repair.
+enum GuestNetwork {
+    static func gatewayAddress(forGuestIP ip: String) -> String? {
+        let octets = ip.split(separator: ".")
+        guard octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }) else { return nil }
+        return octets.dropLast().joined(separator: ".") + ".1"
+    }
+
+    static func repairCommand(gateway: String) -> String {
+        "docker exec hassio_cli ha dns options --servers dns://\(gateway); "
+            + "docker exec hassio_cli ha dns restart; "
+            + "docker exec hassio_cli ha supervisor reload"
+    }
 }
 
 @MainActor

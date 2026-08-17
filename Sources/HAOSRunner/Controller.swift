@@ -15,6 +15,11 @@ final class Controller: NSObject, ObservableObject {
     @Published var selectedVersion: String?
     @Published private(set) var coreDownloadRegressed = false
     @Published private(set) var hasDisk = Paths.hasWorkingDisk
+    @Published private(set) var bridgeUnavailable = false
+    @Published private(set) var guestOffline = false
+    private var guestIP: String?
+    private var repairingNetwork = false
+    private var networkRepairAttempts = 0
     @Published var settings = VMSettings.load() {
         didSet { settings.save() }
     }
@@ -66,6 +71,8 @@ final class Controller: NSObject, ObservableObject {
         guard machine == nil, !state.isBusy else { return }
         offerBootRepair = false
         coreDownloadRegressed = false
+        guestOffline = false
+        networkRepairAttempts = 0
         console.clear()
         try? Paths.ensureSupportDirectory()
         console.beginFileLog(at: Paths.support.appending(path: "console.log"))
@@ -190,6 +197,7 @@ final class Controller: NSObject, ObservableObject {
 
             transition(.starting(.waitingForNetwork), timeout: 240)
             let ip = try await awaitGuestIP()
+            guestIP = ip
             log.notice("guest reachable at \(ip, privacy: .public)")
 
             transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: 2400)
@@ -198,17 +206,15 @@ final class Controller: NSObject, ObservableObject {
             stopProgressPolling()
             log.notice("Home Assistant answering on port \(corePort, privacy: .public)")
 
-            transition(.starting(.connectingBridge), timeout: 300)
-            if await !HTTPProbe.relayAnswers(ip: ip) {
-                shell.run(RelayInstall.command(corePort: corePort))
-                try await awaitProbe { await HTTPProbe.relayAnswers(ip: ip) }
-            }
-
-            guard let url = URL(string: "http://\(ip):\(RelayInstall.port)/") else {
+            transition(.starting(.connectingBridge), timeout: 420)
+            let bridged = await establishBridge(ip: ip, corePort: corePort)
+            bridgeUnavailable = !bridged
+            let port = bridged ? RelayInstall.port : corePort
+            guard let url = URL(string: "http://\(ip):\(port)/") else {
                 throw PipelineFailure(message: "The guest address \(ip) is not a valid URL host.")
             }
             transition(.running(url: url))
-            log.notice("running at \(url.absoluteString, privacy: .public)")
+            log.notice("running at \(url.absoluteString, privacy: .public) bridged=\(bridged, privacy: .public)")
         } catch is CancellationError {
         } catch let failure as PipelineFailure {
             fail(failure.message)
@@ -289,6 +295,24 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
+    /// The bridge makes Home Assistant see connections as loopback, which some
+    /// builds require for WebSockets. It needs an image from Docker Hub, which
+    /// is not always reachable — so it is an enhancement, never a gate: if it
+    /// cannot be established, the machine still runs and Core's own address is
+    /// surfaced instead.
+    private func establishBridge(ip: String, corePort: Int) async -> Bool {
+        if await HTTPProbe.relayAnswers(ip: ip) { return true }
+        guard shell.isAtShell else { return false }
+        shell.run(RelayInstall.command(corePort: corePort))
+        for _ in 0..<60 {
+            if Task.isCancelled { return false }
+            try? await Task.sleep(for: .seconds(4))
+            if await HTTPProbe.relayAnswers(ip: ip) { return true }
+        }
+        log.error("bridge could not be installed; using Home Assistant's own address")
+        return false
+    }
+
     private func awaitCorePort(ip: String) async throws -> Int {
         while true {
             try Task.checkCancellation()
@@ -338,14 +362,38 @@ final class Controller: NSObject, ObservableObject {
 
     private func handleConsoleLine(_ line: String) {
         shell.handleLine(line)
-        guard case .starting(.waitingForHomeAssistant(let current)) = state,
-              let percent = SupervisorLog.downloadPercent(in: line),
-              percent != current else { return }
-        if let current, percent < current - 2 {
-            coreDownloadRegressed = true
+        guard case .starting(.waitingForHomeAssistant(let current)) = state else { return }
+        if let percent = SupervisorLog.downloadPercent(in: line) {
+            guestOffline = false
+            if percent != current {
+                if let current, percent < current - 2 { coreDownloadRegressed = true }
+                transition(.starting(.waitingForHomeAssistant(downloadPercent: percent)), timeout: 2400)
+            }
+            return
         }
-        transition(.starting(.waitingForHomeAssistant(downloadPercent: percent)), timeout: 2400)
+        if SupervisorLog.reportsNoInternet(line), !guestOffline {
+            guestOffline = true
+            log.error("guest reports no internet connectivity")
+            if networkRepairAttempts == 0 { repairGuestNetwork() }
+        }
     }
+
+    /// Points the guest's resolver at the Mac's VM gateway, which forwards DNS
+    /// reliably, then restarts the guest's DNS and Supervisor so the stalled
+    /// Core download starts.
+    func repairGuestNetwork() {
+        guard !repairingNetwork, shell.isAtShell, let ip = guestIP,
+              let gateway = GuestNetwork.gatewayAddress(forGuestIP: ip) else { return }
+        repairingNetwork = true
+        networkRepairAttempts += 1
+        log.notice("repairing guest DNS via gateway \(gateway, privacy: .public)")
+        shell.run(GuestNetwork.repairCommand(gateway: gateway)) { [weak self] in
+            self?.repairingNetwork = false
+            self?.guestOffline = false
+        }
+    }
+
+    var canRepairGuestNetwork: Bool { guestOffline && shell.isAtShell && !repairingNetwork }
 
     // MARK: - State
 

@@ -27,14 +27,26 @@ enum HTTPProbe {
 
     static let corePorts = [8123, 80]
 
-    static func coreAnswers(status: Int?) -> Bool {
-        status == 200 || status == 401
+    /// Home Assistant Core, not the landingpage that stands in for it while it
+    /// downloads. The landingpage answers 200 on `/` and 401 on every `/api/`
+    /// path, so those cannot tell them apart. Core serves the real frontend
+    /// (`/manifest.json`) and answers `/api/onboarding` with 200 before
+    /// onboarding and 404 after it — the landingpage answers 401 to both.
+    static func coreAnswers(onboardingStatus: Int?, manifestStatus: Int?) -> Bool {
+        if manifestStatus == 200 { return true }
+        return onboardingStatus == 200 || onboardingStatus == 404
     }
 
     static func coreServingPort(ip: String) async -> Int? {
         for port in corePorts {
-            guard let url = URL(string: "http://\(ip):\(port)/api/") else { continue }
-            if coreAnswers(status: await status(of: url)) { return port }
+            guard let onboarding = URL(string: "http://\(ip):\(port)/api/onboarding"),
+                  let manifest = URL(string: "http://\(ip):\(port)/manifest.json") else { continue }
+            let onboardingStatus = await status(of: onboarding)
+            guard onboardingStatus != nil else { continue }
+            let manifestStatus = await status(of: manifest)
+            if coreAnswers(onboardingStatus: onboardingStatus, manifestStatus: manifestStatus) {
+                return port
+            }
         }
         return nil
     }

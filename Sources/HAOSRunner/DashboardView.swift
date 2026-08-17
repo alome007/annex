@@ -80,7 +80,8 @@ struct DashboardView: View {
                     current: stage,
                     bootStartedAt: controller.bootStartedAt,
                     freshInstall: controller.freshInstall,
-                    downloadRegressed: controller.coreDownloadRegressed
+                    downloadRegressed: controller.coreDownloadRegressed,
+                    guestOffline: controller.guestOffline
                 )
             }
             if case .running(let url) = controller.state {
@@ -109,6 +110,10 @@ struct DashboardView: View {
                     VersionMenu()
                 }
             case .starting:
+                if controller.canRepairGuestNetwork {
+                    Button("Repair machine network") { controller.repairGuestNetwork() }
+                        .buttonStyle(PrimaryButtonStyle())
+                }
                 Button("Force stop") { controller.forceStop() }
                     .buttonStyle(QuietButtonStyle())
             case .running(let url):
@@ -154,6 +159,7 @@ private struct BootChecklist: View {
     let bootStartedAt: Date?
     let freshInstall: Bool
     let downloadRegressed: Bool
+    let guestOffline: Bool
 
     private var rows: [BootStage] {
         let standard: [BootStage] = [
@@ -192,6 +198,7 @@ private struct BootChecklist: View {
                     current: current,
                     freshInstall: freshInstall,
                     downloadRegressed: downloadRegressed,
+                    guestOffline: guestOffline,
                     isLast: index == rows.count - 1
                 )
             }
@@ -214,6 +221,7 @@ private struct StageRow: View {
     let current: BootStage
     let freshInstall: Bool
     let downloadRegressed: Bool
+    let guestOffline: Bool
     let isLast: Bool
 
     private enum Status { case done, active, pending }
@@ -313,7 +321,9 @@ private struct StageRow: View {
         case .preparingDisk:
             "Unpacking the image into a working disk."
         case .waitingForHomeAssistant(let percent):
-            if let percent, downloadRegressed {
+            if guestOffline {
+                "The machine cannot reach the internet, so Home Assistant cannot download. Repairing its network settings."
+            } else if let percent, downloadRegressed {
                 "Downloading Home Assistant — \(percent)% (connection unstable, download restarted)"
             } else if let percent {
                 "Downloading Home Assistant — \(percent)%"

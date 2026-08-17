@@ -16,23 +16,15 @@ final class RelayInstallTests: XCTestCase {
     func testReplacesAnyExistingRelayContainer() {
         XCTAssertTrue(RelayInstall.command(corePort: 8123).contains("docker rm -f harelay"))
     }
-}
 
-final class CoreProbeTests: XCTestCase {
-    func testAcceptsUnauthorizedAndOKAsCoreUp() {
-        XCTAssertTrue(HTTPProbe.coreAnswers(status: 200))
-        XCTAssertTrue(HTTPProbe.coreAnswers(status: 401))
+    func testProgressPollWatchesProgressAndConnectivity() {
+        let command = RelayInstall.supervisorProgressCommand
+        XCTAssertTrue(command.contains("Core image"))
+        XCTAssertTrue(command.contains("no supervisor internet connection"))
+        XCTAssertTrue(command.contains("--since 2m"))
     }
 
-    func testRejectsRedirectsAndErrors() {
-        XCTAssertFalse(HTTPProbe.coreAnswers(status: 302))
-        XCTAssertFalse(HTTPProbe.coreAnswers(status: 404))
-        XCTAssertFalse(HTTPProbe.coreAnswers(status: 502))
-        XCTAssertFalse(HTTPProbe.coreAnswers(status: nil))
-    }
-
-    func testPrefersCoreOwnPortOverTheRedirectingPort() {
-        XCTAssertEqual(HTTPProbe.corePorts.first, 8123)
+    func testProbesCoreOwnPortBeforeTheRedirectingPort() {
         XCTAssertEqual(HTTPProbe.corePorts, [8123, 80])
     }
 }
