@@ -169,30 +169,33 @@ enum DiskBuilder {
 
     private static func rebuildBlocking() throws {
         try Paths.ensureSupportDirectory()
+        let building = Paths.support.appending(path: "haos.img.building")
+        try? FileManager.default.removeItem(at: building)
         try? FileManager.default.removeItem(at: Paths.diskImage)
         try? FileManager.default.removeItem(at: Paths.efiStore)
 
         switch DiskSource.resolve(userImage: Paths.sourceImage, cachedArchive: ImageDownloader.cachedArchive) {
         case .qcow2(let source):
-            try convertWithQemu(source)
+            try convertWithQemu(source, to: building)
         case .rawImage(let source):
-            try FileManager.default.copyItem(at: source, to: Paths.diskImage)
+            try FileManager.default.copyItem(at: source, to: building)
         case .xzArchive(let archive):
-            try ImageDownloader.decompress(archive: archive, to: Paths.diskImage)
+            try ImageDownloader.decompress(archive: archive, to: building)
         case .none:
             throw VMError.noSourceImage
         }
-        try growDisk()
+        try growDisk(at: building)
+        try FileManager.default.moveItem(at: building, to: Paths.diskImage)
     }
 
-    private static func convertWithQemu(_ source: URL) throws {
+    private static func convertWithQemu(_ source: URL, to destination: URL) throws {
         guard let qemuImg = Tooling.locate("qemu-img") else { throw VMError.toolMissing("qemu-img") }
         let convert = Process()
         convert.executableURL = qemuImg
         convert.arguments = [
             "convert", "-O", "raw",
             source.path(percentEncoded: false),
-            Paths.diskImage.path(percentEncoded: false),
+            destination.path(percentEncoded: false),
         ]
         try convert.run()
         convert.waitUntilExit()
@@ -201,8 +204,8 @@ enum DiskBuilder {
         }
     }
 
-    private static func growDisk() throws {
-        let handle = try FileHandle(forWritingTo: Paths.diskImage)
+    private static func growDisk(at disk: URL) throws {
+        let handle = try FileHandle(forWritingTo: disk)
         defer { try? handle.close() }
         let current = try handle.seekToEnd()
         guard current < diskSizeBytes else { return }
