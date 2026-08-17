@@ -10,11 +10,12 @@ enum ImageDownloadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .releaseLookupFailed(let detail):
-            "Could not look up the latest Home Assistant OS release: \(detail)"
+            "Could not look up the latest Home Assistant OS release: \(detail) "
+                + "Check your internet connection and start again, or pick an image manually in settings."
         case .assetMissing:
-            "The latest Home Assistant OS release has no generic-aarch64 image."
+            "The latest Home Assistant OS release has no generic-aarch64 image. Pick one manually in settings."
         case .downloadFailed(let detail):
-            "The image download failed: \(detail)"
+            "The image download failed: \(detail) Start again to retry, or pick an image manually in settings."
         case .decompressionFailed:
             "The downloaded image is damaged and could not be unpacked. Start again to re-download it."
         }
@@ -22,10 +23,22 @@ enum ImageDownloadError: LocalizedError {
 }
 
 enum ImageDownloader {
-    static let releaseAPI = URL(string: "https://api.github.com/repos/home-assistant/operating-system/releases/latest")!
+    static let latestReleaseURL = URL(string: "https://github.com/home-assistant/operating-system/releases/latest")!
 
     static func imageAssetName(inReleaseAssetNames names: [String]) -> String? {
         names.first { $0.hasPrefix("haos_generic-aarch64-") && $0.hasSuffix(".img.xz") }
+    }
+
+    static func versionTag(fromRedirectLocation location: String) -> String? {
+        guard let url = URL(string: location),
+              url.pathComponents.count >= 2,
+              url.pathComponents.dropLast().last == "tag" else { return nil }
+        let tag = url.lastPathComponent
+        return tag.isEmpty ? nil : tag
+    }
+
+    static func imageURL(forVersion version: String) -> URL? {
+        URL(string: "https://github.com/home-assistant/operating-system/releases/download/\(version)/haos_generic-aarch64-\(version).img.xz")
     }
 
     static var cachedArchive: URL? {
@@ -56,37 +69,36 @@ enum ImageDownloader {
         let url: URL
     }
 
-    private static func latestImageAsset() async throws -> Asset {
-        struct Release: Decodable {
-            struct ReleaseAsset: Decodable {
-                let name: String
-                let browser_download_url: URL
-            }
-            let assets: [ReleaseAsset]
+    private final class RedirectCapture: NSObject, URLSessionTaskDelegate {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest
+        ) async -> URLRequest? {
+            nil
         }
-        var request = URLRequest(url: releaseAPI)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        let (data, response): (Data, URLResponse)
+    }
+
+    private static func latestImageAsset() async throws -> Asset {
+        let session = URLSession(configuration: .ephemeral, delegate: RedirectCapture(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (_, response) = try await session.data(from: latestReleaseURL)
         } catch {
             throw ImageDownloadError.releaseLookupFailed(error.localizedDescription)
         }
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw ImageDownloadError.releaseLookupFailed("GitHub answered with status \(status).")
+        guard let http = response as? HTTPURLResponse,
+              (300..<400).contains(http.statusCode),
+              let location = http.value(forHTTPHeaderField: "Location"),
+              let version = versionTag(fromRedirectLocation: location) else {
+            throw ImageDownloadError.releaseLookupFailed("GitHub did not report a latest release.")
         }
-        let release: Release
-        do {
-            release = try JSONDecoder().decode(Release.self, from: data)
-        } catch {
-            throw ImageDownloadError.releaseLookupFailed("Unexpected response format.")
-        }
-        guard let name = imageAssetName(inReleaseAssetNames: release.assets.map(\.name)),
-              let asset = release.assets.first(where: { $0.name == name }) else {
+        guard let url = imageURL(forVersion: version) else {
             throw ImageDownloadError.assetMissing
         }
-        return Asset(name: asset.name, url: asset.browser_download_url)
+        return Asset(name: url.lastPathComponent, url: url)
     }
 
     static func decompress(archive: URL, to output: URL) throws {
