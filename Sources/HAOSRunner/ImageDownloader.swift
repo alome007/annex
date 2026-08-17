@@ -93,11 +93,14 @@ enum ImageDownloader {
         }
         switch http.statusCode {
         case 200:
-            guard let releases = releases(fromJSON: data), !releases.isEmpty else {
-                throw ImageDownloadError.assetMissing
+            if let releases = releases(fromJSON: data), !releases.isEmpty {
+                ReleaseCache.store(data: data, etag: http.value(forHTTPHeaderField: "ETag"))
+                return releases
             }
-            ReleaseCache.store(data: data, etag: http.value(forHTTPHeaderField: "ETag"))
-            return releases
+            if let cached = ReleaseCache.load() { return cached }
+            throw ImageDownloadError.releaseLookupFailed(
+                "GitHub's answer could not be read — something on this network may be intercepting the connection."
+            )
         case 304:
             guard let cached = ReleaseCache.load() else {
                 ReleaseCache.clear()
