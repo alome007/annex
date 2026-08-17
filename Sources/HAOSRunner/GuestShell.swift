@@ -1,18 +1,8 @@
 import Foundation
 import os
 
-enum RelayInstall {
-    static let port = 9999
-    static let containerName = "harelay"
-
-    static func command(corePort: Int) -> String {
-        "for i in 1 2 3 4 5; do docker pull alpine/socat && break; sleep 6; done; "
-            + "docker rm -f \(containerName) 2>/dev/null; "
-            + "docker run -d --network host --restart unless-stopped --name \(containerName) "
-            + "alpine/socat TCP-LISTEN:\(port),fork,reuseaddr TCP:127.0.0.1:\(corePort)"
-    }
-
-    static let supervisorProgressCommand =
+enum SupervisorProbe {
+    static let progressCommand =
         "docker logs --since 2m hassio_supervisor 2>/dev/null | "
             + "grep -E 'Core image|no supervisor internet connection|has no Home Assistant version' | tail -n 2"
 }

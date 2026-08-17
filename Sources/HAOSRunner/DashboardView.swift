@@ -166,7 +166,6 @@ private struct BootChecklist: View {
             .startingMachine,
             .waitingForNetwork,
             .waitingForHomeAssistant(downloadPercent: nil),
-            .connectingBridge,
         ]
         switch current {
         case .downloadingImage:
@@ -332,8 +331,6 @@ private struct StageRow: View {
             } else {
                 "Home Assistant is starting up. This usually takes about a minute."
             }
-        case .connectingBridge:
-            "Setting up the connection so your browser can reach it."
         default:
             nil
         }

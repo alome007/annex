@@ -6,7 +6,6 @@ enum BootStage: Equatable {
     case startingMachine
     case waitingForNetwork
     case waitingForHomeAssistant(downloadPercent: Int?)
-    case connectingBridge
 
     var ordinal: Int {
         switch self {
@@ -15,7 +14,6 @@ enum BootStage: Equatable {
         case .startingMachine: 2
         case .waitingForNetwork: 3
         case .waitingForHomeAssistant: 4
-        case .connectingBridge: 5
         }
     }
 
@@ -26,7 +24,6 @@ enum BootStage: Equatable {
         case .startingMachine: "Starting the machine"
         case .waitingForNetwork: "Waiting for the network"
         case .waitingForHomeAssistant: "Waiting for Home Assistant"
-        case .connectingBridge: "Connecting the bridge"
         }
     }
 }

@@ -15,7 +15,6 @@ final class Controller: NSObject, ObservableObject {
     @Published var selectedVersion: String?
     @Published private(set) var coreDownloadRegressed = false
     @Published private(set) var hasDisk = Paths.hasWorkingDisk
-    @Published private(set) var bridgeUnavailable = false
     @Published private(set) var guestOffline = false
     private var guestIP: String?
     private var repairingNetwork = false
@@ -206,15 +205,11 @@ final class Controller: NSObject, ObservableObject {
             stopProgressPolling()
             log.notice("Home Assistant answering on port \(corePort, privacy: .public)")
 
-            transition(.starting(.connectingBridge), timeout: 420)
-            let bridged = await establishBridge(ip: ip, corePort: corePort)
-            bridgeUnavailable = !bridged
-            let port = bridged ? RelayInstall.port : corePort
-            guard let url = URL(string: "http://\(ip):\(port)/") else {
+            guard let url = URL(string: "http://\(ip):\(corePort)/") else {
                 throw PipelineFailure(message: "The guest address \(ip) is not a valid URL host.")
             }
             transition(.running(url: url))
-            log.notice("running at \(url.absoluteString, privacy: .public) bridged=\(bridged, privacy: .public)")
+            log.notice("running at \(url.absoluteString, privacy: .public)")
         } catch is CancellationError {
         } catch let failure as PipelineFailure {
             fail(failure.message)
@@ -295,23 +290,6 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
-    /// The bridge makes Home Assistant see connections as loopback, which some
-    /// builds require for WebSockets. It needs an image from Docker Hub, which
-    /// is not always reachable — so it is an enhancement, never a gate: if it
-    /// cannot be established, the machine still runs and Core's own address is
-    /// surfaced instead.
-    private func establishBridge(ip: String, corePort: Int) async -> Bool {
-        if await HTTPProbe.relayAnswers(ip: ip) { return true }
-        guard shell.isAtShell else { return false }
-        shell.run(RelayInstall.command(corePort: corePort))
-        for _ in 0..<60 {
-            if Task.isCancelled { return false }
-            try? await Task.sleep(for: .seconds(4))
-            if await HTTPProbe.relayAnswers(ip: ip) { return true }
-        }
-        log.error("bridge could not be installed; using Home Assistant's own address")
-        return false
-    }
 
     private func awaitCorePort(ip: String) async throws -> Int {
         while true {
@@ -338,7 +316,7 @@ final class Controller: NSObject, ObservableObject {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
                 guard case .starting(.waitingForHomeAssistant) = self.state, self.shell.isAtShell else { continue }
-                self.console.send(RelayInstall.supervisorProgressCommand)
+                self.console.send(SupervisorProbe.progressCommand)
             }
         }
     }
