@@ -320,13 +320,9 @@ final class Controller: NSObject, ObservableObject {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
                 guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, self.shell.isAtShell else { continue }
+                _ = percent
                 ticks += 1
-                if percent == nil, ticks % 18 == 0 {
-                    self.log.notice("nudging Supervisor to retry its version fetch")
-                    self.shell.run(GuestNetwork.nudgeCommand)
-                } else {
-                    self.console.send(SupervisorProbe.progressCommand)
-                }
+                self.console.send(SupervisorProbe.progressCommand)
             }
         }
     }
@@ -362,25 +358,22 @@ final class Controller: NSObject, ObservableObject {
         if SupervisorLog.reportsNoInternet(line), !guestOffline {
             guestOffline = true
             log.error("guest reports no internet connectivity")
-            if networkRepairAttempts == 0 { repairGuestNetwork() }
         }
     }
 
-    /// Supervisor only downloads Core once it believes it has internet. If a
-    /// boot loses that race — the network was down when the guest started —
-    /// it retries its version fetch forever without ever recovering DNS. Rather
-    /// than scrape its log for one of several wordings, treat "no Core after
-    /// three minutes" as the signal and repair once.
+    /// A first boot legitimately spends ten minutes or more installing Core, and
+    /// restarting Supervisor or its DNS while that is under way wedges the
+    /// guest's container runtime. So this never intervenes on its own: it waits
+    /// well past a normal install, then surfaces the repair for the operator to
+    /// choose.
     private func startCoreStallWatch() {
         coreStallWatch?.cancel()
         coreStallWatch = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(180))
+            try? await Task.sleep(for: .seconds(720))
             guard !Task.isCancelled, let self else { return }
             guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, percent == nil else { return }
-            guard self.networkRepairAttempts == 0 else { return }
             self.guestOffline = true
-            self.log.notice("Core has not appeared after 3 minutes; repairing guest network")
-            self.repairGuestNetwork()
+            self.log.notice("Core has not appeared after 12 minutes; offering guest network repair")
         }
     }
 
