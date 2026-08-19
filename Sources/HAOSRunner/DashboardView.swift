@@ -81,7 +81,8 @@ struct DashboardView: View {
                     bootStartedAt: controller.bootStartedAt,
                     freshInstall: controller.freshInstall,
                     downloadRegressed: controller.coreDownloadRegressed,
-                    guestOffline: controller.guestOffline
+                    guestOffline: controller.guestOffline,
+                    dnsOverridden: controller.guestDNSOverridden
                 )
             }
             if case .running(let url) = controller.state {
@@ -167,6 +168,7 @@ private struct BootChecklist: View {
     let freshInstall: Bool
     let downloadRegressed: Bool
     let guestOffline: Bool
+    let dnsOverridden: Bool
 
     private var rows: [BootStage] {
         let standard: [BootStage] = [
@@ -206,6 +208,7 @@ private struct BootChecklist: View {
                     freshInstall: freshInstall,
                     downloadRegressed: downloadRegressed,
                     guestOffline: guestOffline,
+                    dnsOverridden: dnsOverridden,
                     isLast: index == rows.count - 1
                 )
             }
@@ -229,6 +232,7 @@ private struct StageRow: View {
     let freshInstall: Bool
     let downloadRegressed: Bool
     let guestOffline: Bool
+    let dnsOverridden: Bool
     let isLast: Bool
 
     private enum Status { case done, active, pending }
@@ -328,7 +332,9 @@ private struct StageRow: View {
         case .preparingDisk:
             "Unpacking the image into a working disk."
         case .waitingForHomeAssistant(let percent):
-            if guestOffline {
+            if dnsOverridden {
+                "The machine could not look up addresses, so it was switched to public DNS. Home Assistant is downloading now."
+            } else if guestOffline {
                 "The machine's connection is too slow or unstable for Home Assistant's download check. Retrying — this can take a while."
             } else if let percent, downloadRegressed {
                 "Downloading Home Assistant — \(percent)% (connection unstable, download restarted)"

@@ -46,6 +46,40 @@ enum GuestNetwork {
     /// can fail outright. Each step is therefore best-effort, the CLI is started
     /// first, and the parts that matter — the resolver and Supervisor itself —
     /// are driven through docker, which is always available on the host.
+    /// Asks the guest whether it can resolve a name at all. Two details matter:
+    /// the result is a status code rather than a word, so the echoed command the
+    /// console also prints cannot be mistaken for the answer; and the failure
+    /// case needs its own `printf`, because curl writes no `-w` output at all
+    /// when it cannot resolve the host — leaving the probe silent in exactly the
+    /// case it exists to detect. `%s` keeps the literal digits out of the
+    /// command text for the same reason.
+    static let dnsProbeCommand =
+        "curl -sS -m 8 -o /dev/null -w 'haosdns=%{http_code}\\n' "
+            + "https://version.home-assistant.io/stable.json 2>/dev/null "
+            + "|| printf 'haosdns=%s\\n' 000"
+
+    static func dnsProbeResult(in line: String) -> Int? {
+        guard let range = line.range(of: "haosdns=") else { return nil }
+        let digits = line[range.upperBound...].prefix { $0.isNumber }
+        guard digits.count == 3 else { return nil }
+        return Int(digits)
+    }
+
+    static func dnsIsWorking(probeStatus: Int) -> Bool {
+        probeStatus == 200
+    }
+
+    /// Home Assistant OS resolves through its own CoreDNS, which prefers
+    /// DNS-over-TLS on port 853. Networks that block that port leave the guest
+    /// unable to resolve anything, so Supervisor never learns which Core version
+    /// to install and the machine waits forever. Plain resolvers on port 53 fix
+    /// it. Only applied when the probe above proves resolution is broken —
+    /// HAOS's encrypted default is the better choice when it works. The single
+    /// server form is the fallback because only that syntax is verified.
+    static let publicResolverCommand =
+        "docker exec hassio_cli ha dns options --servers dns://1.1.1.1 --servers dns://8.8.8.8 "
+            + "|| docker exec hassio_cli ha dns options --servers dns://8.8.8.8"
+
     static func repairCommand(gateway: String) -> String {
         "docker start hassio_cli >/dev/null 2>&1; "
             + "docker exec hassio_cli ha dns options --servers dns://\(gateway) || true; "

@@ -17,6 +17,9 @@ final class Controller: NSObject, ObservableObject {
     @Published private(set) var hasDisk = Paths.hasWorkingDisk
     @Published private(set) var guestOffline = false
     @Published private(set) var bridgeUnavailable = false
+    @Published private(set) var guestDNSOverridden = false
+    private var dnsGuard: Task<Void, Never>?
+    private var dnsOverrideApplied = false
     private var guestIP: String?
     private var repairingNetwork = false
     private var networkRepairAttempts = 0
@@ -73,6 +76,8 @@ final class Controller: NSObject, ObservableObject {
         offerBootRepair = false
         coreDownloadRegressed = false
         guestOffline = false
+        guestDNSOverridden = false
+        dnsOverrideApplied = false
         networkRepairAttempts = 0
         console.clear()
         try? Paths.ensureSupportDirectory()
@@ -204,6 +209,7 @@ final class Controller: NSObject, ObservableObject {
             transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: 2400)
             startProgressPolling()
             startCoreStallWatch()
+            startDNSGuard()
             let corePort = try await awaitCorePort(ip: ip)
             stopProgressPolling()
             coreStallWatch?.cancel()
@@ -369,6 +375,10 @@ final class Controller: NSObject, ObservableObject {
 
     private func handleConsoleLine(_ line: String) {
         shell.handleLine(line)
+        if let status = GuestNetwork.dnsProbeResult(in: line) {
+            handleDNSProbe(status: status)
+            return
+        }
         guard case .starting(.waitingForHomeAssistant(let current)) = state else { return }
         if let percent = SupervisorLog.downloadPercent(in: line) {
             guestOffline = false
@@ -382,6 +392,38 @@ final class Controller: NSObject, ObservableObject {
             guestOffline = true
             log.error("guest reports no internet connectivity")
         }
+    }
+
+    /// Supervisor cannot install Core until the guest can resolve names, and on
+    /// networks that block DNS-over-TLS it never can. Asking early — while
+    /// Supervisor is still retrying its version fetch every thirty seconds —
+    /// means the fix lands before anything has given up, so nothing needs
+    /// restarting afterwards.
+    private func startDNSGuard() {
+        dnsGuard?.cancel()
+        dnsGuard = Task { [weak self] in
+            for attempt in 0..<5 {
+                try? await Task.sleep(for: .seconds(attempt == 0 ? 40 : 60))
+                guard !Task.isCancelled, let self, !self.dnsOverrideApplied else { return }
+                guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, percent == nil else { return }
+                guard self.shell.isAtShell else { continue }
+                self.shell.run(GuestNetwork.dnsProbeCommand)
+            }
+        }
+    }
+
+    private func handleDNSProbe(status: Int) {
+        guard !dnsOverrideApplied else { return }
+        if GuestNetwork.dnsIsWorking(probeStatus: status) {
+            dnsGuard?.cancel()
+            log.notice("guest DNS is working")
+            return
+        }
+        dnsOverrideApplied = true
+        guestDNSOverridden = true
+        dnsGuard?.cancel()
+        log.notice("guest cannot resolve names; switching it to plain resolvers")
+        shell.run(GuestNetwork.publicResolverCommand)
     }
 
     /// A first boot legitimately spends ten minutes or more installing Core, and
@@ -494,6 +536,8 @@ final class Controller: NSObject, ObservableObject {
         silenceWatch = nil
         coreStallWatch?.cancel()
         coreStallWatch = nil
+        dnsGuard?.cancel()
+        dnsGuard = nil
         stopProgressPolling()
         shell.reset()
     }
