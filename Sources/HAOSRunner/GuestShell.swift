@@ -1,6 +1,28 @@
 import Foundation
 import os
 
+/// Home Assistant serves its WebSocket cleanly to loopback-origin requests but
+/// rejects ones arriving over the network, and `:8123` answers a WebSocket
+/// upgrade with a redirect that browsers cannot follow. Onboarding and the live
+/// dashboard therefore fail when the browser talks to Core directly, even
+/// though every HTTP request and the upgrade handshake itself succeed — which
+/// is why testing those two things is not enough to conclude the bridge is
+/// unnecessary. A `socat` container in the guest's own network namespace
+/// forwards `:9999` to Core over loopback, so Home Assistant sees every
+/// connection as local. Verified on 2026-08-19: onboarding fails without this
+/// and completes with it. Do not remove.
+enum RelayInstall {
+    static let port = 9999
+    static let containerName = "harelay"
+
+    static func command(corePort: Int) -> String {
+        "for i in 1 2 3 4 5; do docker pull alpine/socat && break; sleep 6; done; "
+            + "docker rm -f \(containerName) 2>/dev/null; "
+            + "docker run -d --network host --restart unless-stopped --name \(containerName) "
+            + "alpine/socat TCP-LISTEN:\(port),fork,reuseaddr TCP:127.0.0.1:\(corePort)"
+    }
+}
+
 enum SupervisorProbe {
     static let progressCommand =
         "docker logs --since 2m hassio_supervisor 2>/dev/null | "

@@ -51,4 +51,9 @@ enum HTTPProbe {
         return nil
     }
 
+    static func relayAnswers(ip: String) async -> Bool {
+        guard let url = URL(string: "http://\(ip):\(RelayInstall.port)/") else { return false }
+        guard let status = await status(of: url) else { return false }
+        return status < 500
+    }
 }

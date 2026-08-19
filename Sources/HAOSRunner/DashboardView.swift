@@ -86,6 +86,13 @@ struct DashboardView: View {
             }
             if case .running(let url) = controller.state {
                 AddressBlock(url: url)
+                if controller.bridgeUnavailable {
+                    Text("The bridge could not be installed, so this is Home Assistant's own address. Onboarding and the dashboard may fail to load until the machine can reach Docker Hub — start again once it can.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: 460, alignment: .leading)
+                }
             }
             if case .failed(let message) = controller.state {
                 ErrorBlock(message: message)
@@ -166,6 +173,7 @@ private struct BootChecklist: View {
             .startingMachine,
             .waitingForNetwork,
             .waitingForHomeAssistant(downloadPercent: nil),
+            .connectingBridge,
         ]
         switch current {
         case .downloadingImage:
@@ -331,6 +339,8 @@ private struct StageRow: View {
             } else {
                 "Home Assistant is starting up. This usually takes about a minute."
             }
+        case .connectingBridge:
+            "Setting up the connection your browser needs to reach it."
         default:
             nil
         }
