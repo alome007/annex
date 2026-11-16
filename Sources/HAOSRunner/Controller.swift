@@ -16,34 +16,60 @@ final class Controller: NSObject, ObservableObject {
     @Published private(set) var coreDownloadRegressed = false
     @Published private(set) var hasDisk = Paths.hasWorkingDisk
     @Published private(set) var guestOffline = false
+    @Published private(set) var guestDownload: SupervisorLog.Download?
     @Published private(set) var bridgeUnavailable = false
-    @Published private(set) var guestDNSOverridden = false
-    private var dnsGuard: Task<Void, Never>?
-    private var dnsOverrideApplied = false
-    private var guestIP: String?
-    private var repairingNetwork = false
-    private var networkRepairAttempts = 0
+    @Published private(set) var sharing: PortForwarder.State = .stopped
+    /// Home Assistant's address for other devices, while the port is shared.
+    @Published private(set) var sharedAddress: URL?
+    @Published private(set) var opensAtLogin = false
+    /// A sentence about something that failed, shown until dismissed.
+    @Published var notice: String?
     @Published var settings = VMSettings.load() {
-        didSet { settings.save() }
+        didSet {
+            settings.save()
+            applySharing()
+            if settings.notifications, !oldValue.notifications {
+                Task { _ = await Notifier.requestPermission() }
+            }
+        }
     }
+
+    let home: HomeAssistantStore
+    let snapshots: SnapshotLibrary
 
     private let console = SerialConsole.shared
     private let shell: GuestShell
+    private let forwarder = PortForwarder()
     private let log = Logger(subsystem: "casa.astrohome.haosrunner", category: "controller")
     private var machine: VZVirtualMachine?
     private var pipeline: Task<Void, Never>?
     private var watchdog: Task<Void, Never>?
     private var progressPoll: Task<Void, Never>?
     private var silenceWatch: Task<Void, Never>?
-    private var coreStallWatch: Task<Void, Never>?
     private var vmStateObservation: NSKeyValueObservation?
     private var quitCompletion: (() -> Void)?
+    /// Set while a restart's shutdown is under way, so the machine starts
+    /// again once it is off.
+    private var restartWhenStopped = false
 
     private override init() {
-        shell = GuestShell(console: console)
+        let shell = GuestShell { [console] text in console.send(text, visible: false) }
+        self.shell = shell
+        home = HomeAssistantStore(client: SupervisorClient(send: { command, timeout in
+            try await shell.capture(command, timeout: timeout)
+        }))
+        snapshots = SnapshotLibrary(files: .current)
         super.init()
-        console.onLine = { [weak self] line in self?.handleConsoleLine(line) }
+        console.onLine = { [weak self] line in self?.handleConsoleLine(line) ?? false }
         console.onTail = { [weak self] tail in self?.shell.handleTail(tail) }
+        home.onFailure = { [weak self] message in
+            self?.log.error("\(message, privacy: .public)")
+            self?.notice = message
+        }
+        forwarder.onStateChange = { [weak self] state in
+            Task { @MainActor in self?.sharingChanged(to: state) }
+        }
+        opensAtLogin = LoginItem.isEnabled
         refreshReleases()
         if settings.startOnLaunch {
             Task { @MainActor in self.start() }
@@ -63,6 +89,28 @@ final class Controller: NSObject, ObservableObject {
 
     var machineIsActive: Bool { machine != nil }
     var canErase: Bool { machine == nil && Paths.hasWorkingDisk }
+
+    /// Whether the machine's disk can be copied or replaced right now.
+    var canManageSnapshots: Bool { machine == nil && !state.isBusy && !snapshots.isWorking }
+
+    /// What the window shows about the machine, as plain values.
+    var status: MachineStatus {
+        MachineStatus(
+            state: state,
+            hasDisk: hasDisk,
+            isActive: machine != nil,
+            bootStartedAt: bootStartedAt,
+            freshInstall: freshInstall,
+            downloadRegressed: coreDownloadRegressed,
+            guestOffline: guestOffline,
+            download: guestDownload,
+            bridgeUnavailable: bridgeUnavailable,
+            offerBootRepair: offerBootRepair,
+            canResume: machine == nil && SavedSession.exists && SavedSession.matches(settings),
+            sharing: sharing,
+            sharedAddress: sharedAddress
+        )
+    }
     var hasDownloadedImage: Bool { ImageDownloader.cachedArchive != nil }
 
     func noteSettingsChanged() {
@@ -72,13 +120,11 @@ final class Controller: NSObject, ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        guard machine == nil, !state.isBusy else { return }
+        guard machine == nil, !state.isBusy, !snapshots.isWorking else { return }
         offerBootRepair = false
         coreDownloadRegressed = false
         guestOffline = false
-        guestDNSOverridden = false
-        dnsOverrideApplied = false
-        networkRepairAttempts = 0
+        guestDownload = nil
         console.clear()
         try? Paths.ensureSupportDirectory()
         console.beginFileLog(at: Paths.support.appending(path: "console.log"))
@@ -88,12 +134,24 @@ final class Controller: NSObject, ObservableObject {
     }
 
     func stop() {
-        guard let vm = machine, vm.canRequestStop else {
+        guard let vm = machine else {
             forceStop()
             return
         }
-        cancelBootWork()
+        // Ask through the shell while the app is logged in to the guest; it
+        // stays logged in so the request can be typed.
+        let canAskGuest = shell.isAtShell
+        guard canAskGuest || vm.canRequestStop else {
+            forceStop()
+            return
+        }
+        cancelBootWork(keepingShell: canAskGuest)
         transition(.stopping, timeout: 120)
+        if canAskGuest {
+            log.notice("asking the guest to shut down")
+            shell.run(GuestCommand.shutdown)
+            return
+        }
         do {
             try vm.requestStop()
         } catch {
@@ -101,7 +159,20 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
+    /// Shuts the machine down cleanly and starts it again from cold.
+    ///
+    /// Resuming a suspended session brings back the same running system, so
+    /// anything that only happens at boot, such as the data disk check, needs
+    /// this instead.
+    func restart() {
+        guard machine != nil, case .running = state else { return }
+        log.notice("restarting")
+        restartWhenStopped = true
+        stop()
+    }
+
     func forceStop() {
+        restartWhenStopped = false
         cancelBootWork()
         guard let vm = machine else {
             transition(.stopped)
@@ -119,6 +190,7 @@ final class Controller: NSObject, ObservableObject {
     }
 
     func shutdownForQuit(completion: @escaping () -> Void) {
+        restartWhenStopped = false
         guard let vm = machine else {
             completion()
             return
@@ -199,20 +271,17 @@ final class Controller: NSObject, ObservableObject {
                 try await bootMachine()
             }
             shell.begin()
+            if resumed { shell.requestPrompt() }
             startSilenceWatch()
 
             transition(.starting(.waitingForNetwork), timeout: 240)
             let ip = try await awaitGuestIP()
-            guestIP = ip
             log.notice("guest reachable at \(ip, privacy: .public)")
 
-            transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: 2400)
+            transition(.starting(.waitingForHomeAssistant(downloadPercent: nil)), timeout: Self.coreWaitTimeout)
             startProgressPolling()
-            startCoreStallWatch()
-            startDNSGuard()
             let corePort = try await awaitCorePort(ip: ip)
             stopProgressPolling()
-            coreStallWatch?.cancel()
             log.notice("Home Assistant answering on port \(corePort, privacy: .public)")
 
             transition(.starting(.connectingBridge), timeout: 600)
@@ -307,7 +376,7 @@ final class Controller: NSObject, ObservableObject {
 
     /// Installs the loopback bridge if it is not already answering. It survives
     /// guest reboots, so warm starts skip straight past this. If it cannot be
-    /// installed — the guest needs Docker Hub for the socat image — the machine
+    /// installed (the guest needs Docker Hub for the socat image), the machine
     /// still runs and Core's own address is surfaced, with the UI saying the
     /// interface may not work until the bridge is in place.
     private func establishBridge(ip: String, corePort: Int) async -> Bool {
@@ -331,27 +400,18 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
-    private func awaitProbe(_ probe: () async -> Bool) async throws {
-        while true {
-            try Task.checkCancellation()
-            if await probe() { return }
-            try await Task.sleep(for: .seconds(1.5))
-        }
-    }
-
     // MARK: - Progress
+
+    private static let coreWaitTimeout: TimeInterval = 2400
 
     private func startProgressPolling() {
         progressPoll?.cancel()
         progressPoll = Task { [weak self] in
-            var ticks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
-                guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, self.shell.isAtShell else { continue }
-                _ = percent
-                ticks += 1
-                self.console.send(SupervisorProbe.progressCommand)
+                guard case .starting(.waitingForHomeAssistant) = self.state, self.shell.isIdle else { continue }
+                self.shell.run(SupervisorProbe.progressCommand, timeout: 30)
             }
         }
     }
@@ -373,102 +433,81 @@ final class Controller: NSObject, ObservableObject {
         transition(.starting(.downloadingImage(percent: percent)), timeout: 3600)
     }
 
-    private func handleConsoleLine(_ line: String) {
-        shell.handleLine(line)
-        if let status = GuestNetwork.dnsProbeResult(in: line) {
-            handleDNSProbe(status: status)
-            return
-        }
+    /// - Returns: whether the line is the app's own command traffic.
+    private func handleConsoleLine(_ line: String) -> Bool {
+        let appTraffic = shell.handleLine(line)
+        noteBootProgress(line)
+        return appTraffic
+    }
+
+    private func noteBootProgress(_ line: String) {
         guard case .starting(.waitingForHomeAssistant(let current)) = state else { return }
         if let percent = SupervisorLog.downloadPercent(in: line) {
             guestOffline = false
             if percent != current {
                 if let current, percent < current - 2 { coreDownloadRegressed = true }
-                transition(.starting(.waitingForHomeAssistant(downloadPercent: percent)), timeout: 2400)
+                transition(.starting(.waitingForHomeAssistant(downloadPercent: percent)), timeout: Self.coreWaitTimeout)
             }
             return
         }
-        if SupervisorLog.reportsNoInternet(line), !guestOffline {
-            guestOffline = true
-            log.error("guest reports no internet connectivity")
-        }
+        guard SupervisorLog.isRecord(line) else { return }
+        noteSupervisorRecord(line)
     }
 
-    /// Supervisor cannot install Core until the guest can resolve names, and on
-    /// networks that block DNS-over-TLS it never can. Asking early — while
-    /// Supervisor is still retrying its version fetch every thirty seconds —
-    /// means the fix lands before anything has given up, so nothing needs
-    /// restarting afterwards.
-    private func startDNSGuard() {
-        dnsGuard?.cancel()
-        dnsGuard = Task { [weak self] in
-            for attempt in 0..<5 {
-                try? await Task.sleep(for: .seconds(attempt == 0 ? 40 : 60))
-                guard !Task.isCancelled, let self, !self.dnsOverrideApplied else { return }
-                guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, percent == nil else { return }
-                guard self.shell.isAtShell else { continue }
-                self.shell.run(GuestNetwork.dnsProbeCommand)
-            }
-        }
-    }
+    /// The poll returns Supervisor's newest record, so each one replaces what
+    /// was known before: a download or an offline report holds only until
+    /// Supervisor says something else.
+    private func noteSupervisorRecord(_ line: String) {
+        let offline = SupervisorLog.reportsNoInternet(line)
+        if offline, !guestOffline { log.error("Supervisor reports no internet connectivity") }
+        guestOffline = offline
 
-    private func handleDNSProbe(status: Int) {
-        guard !dnsOverrideApplied else { return }
-        if GuestNetwork.dnsIsWorking(probeStatus: status) {
-            dnsGuard?.cancel()
-            log.notice("guest DNS is working")
-            return
+        let download = SupervisorLog.download(in: line)
+        if let download, download != guestDownload {
+            log.notice("Supervisor downloading \(download.component, privacy: .public) \(download.version, privacy: .public)")
         }
-        dnsOverrideApplied = true
-        guestDNSOverridden = true
-        dnsGuard?.cancel()
-        log.notice("guest cannot resolve names; switching it to plain resolvers")
-        shell.run(GuestNetwork.publicResolverCommand)
+        guestDownload = download
+        // One image can take longer than the whole stage allows on a slow
+        // route, and Supervisor logs nothing while it downloads. A poll that
+        // still shows the download as the newest record restarts the clock.
+        if download != nil { armWatchdog(timeout: Self.coreWaitTimeout) }
     }
-
-    /// A first boot legitimately spends ten minutes or more installing Core, and
-    /// restarting Supervisor or its DNS while that is under way wedges the
-    /// guest's container runtime. So this never intervenes on its own: it waits
-    /// well past a normal install, then surfaces the repair for the operator to
-    /// choose.
-    private func startCoreStallWatch() {
-        coreStallWatch?.cancel()
-        coreStallWatch = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(720))
-            guard !Task.isCancelled, let self else { return }
-            guard case .starting(.waitingForHomeAssistant(let percent)) = self.state, percent == nil else { return }
-            self.guestOffline = true
-            self.log.notice("Core has not appeared after 12 minutes; offering guest network repair")
-        }
-    }
-
-    /// Points the guest's resolver at the Mac's VM gateway, which forwards DNS
-    /// reliably, then restarts the guest's DNS and Supervisor so the stalled
-    /// Core download starts.
-    func repairGuestNetwork() {
-        guard !repairingNetwork, shell.isAtShell, let ip = guestIP,
-              let gateway = GuestNetwork.gatewayAddress(forGuestIP: ip) else { return }
-        repairingNetwork = true
-        networkRepairAttempts += 1
-        log.notice("repairing guest DNS via gateway \(gateway, privacy: .public)")
-        shell.run(GuestNetwork.repairCommand(gateway: gateway)) { [weak self] in
-            self?.repairingNetwork = false
-            self?.guestOffline = false
-        }
-    }
-
-    var canRepairGuestNetwork: Bool { guestOffline && shell.isAtShell && !repairingNetwork }
 
     // MARK: - State
 
     private func transition(_ new: VMState, timeout: TimeInterval? = nil) {
         watchdog?.cancel()
         watchdog = nil
-        if state.phase != new.phase { stageStartedAt = .now }
+        let old = state
+        if old.phase != new.phase { stageStartedAt = .now }
         state = new
         log.notice("state \(new.phase, privacy: .public)")
+        if old.phase != new.phase { phaseChanged(from: old, to: new) }
         guard let timeout else { return }
-        let phase = new.phase
+        armWatchdog(timeout: timeout)
+    }
+
+    private func phaseChanged(from old: VMState, to new: VMState) {
+        if case .running(let url) = new {
+            home.connect(to: url)
+            notify("Home Assistant is running", url.absoluteString)
+        } else if case .running = old {
+            home.disconnect()
+        }
+        if case .failed(let message) = new, case .starting = old {
+            notify("Home Assistant did not start", message)
+        }
+        applySharing()
+    }
+
+    private func notify(_ title: String, _ body: String) {
+        guard settings.notifications else { return }
+        Notifier.post(title: title, body: body)
+    }
+
+    private func armWatchdog(timeout: TimeInterval) {
+        watchdog?.cancel()
+        let phase = state.phase
         watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled else { return }
@@ -483,7 +522,7 @@ final class Controller: NSObject, ObservableObject {
         let minutes = Int(seconds / 60)
         switch state {
         case .starting(let stage):
-            fail("\(stage.title) has not finished after \(minutes) minutes. The console below may show why. Force stop powers the machine off.")
+            fail("\(stage.title) has not finished after \(minutes) minutes. The console may show why. Force stop powers the machine off.")
         case .stopping:
             fail("The machine has not shut down after \(minutes) minutes. Force stop powers it off.")
         default:
@@ -508,13 +547,95 @@ final class Controller: NSObject, ObservableObject {
             self.fail(
                 "The machine started but produced no boot output for 90 seconds. "
                     + "This usually means its boot selector ran out of retries after interrupted starts. "
-                    + "Repair startup resets it and tries again — your Home Assistant data is untouched."
+                    + "Repair startup resets it and tries again. Your Home Assistant data is untouched."
             )
         }
     }
 
+    // MARK: - Console
+
+    /// Sends what the user typed in the console to the guest.
+    func sendConsoleCommand(_ text: String) {
+        shell.noteUserInput()
+        console.send(text)
+    }
+
+    // MARK: - Sharing and login
+
+    private func applySharing() {
+        guard settings.shareOnNetwork, !settings.bridgedNetworking,
+              case .running(let url) = state, let host = url.host(), let port = url.port else {
+            forwarder.stop()
+            return
+        }
+        forwarder.start(port: VMSettings.sharePort, host: host, targetPort: UInt16(port))
+    }
+
+    private func sharingChanged(to new: PortForwarder.State) {
+        guard new != sharing else { return }
+        sharing = new
+        if case .listening(let port) = new, let address = LocalNetwork.address() {
+            sharedAddress = URL(string: "http://\(address):\(port)/")
+        } else {
+            sharedAddress = nil
+        }
+    }
+
+    func setOpensAtLogin(_ enabled: Bool) {
+        do {
+            try LoginItem.setEnabled(enabled)
+        } catch {
+            notice = "Could not change the login item. \(error.localizedDescription)"
+        }
+        opensAtLogin = LoginItem.isEnabled
+    }
+
+    // MARK: - Snapshots
+
+    func takeSnapshot() {
+        guard canManageSnapshots, Paths.hasWorkingDisk else { return }
+        let name = Date.now.formatted(date: .abbreviated, time: .shortened)
+        Task {
+            do {
+                try await snapshots.take(named: name, suspendedSession: SavedSession.recordedFingerprint)
+            } catch {
+                notice = "Could not take the snapshot. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func restoreSnapshot(_ snapshot: DiskSnapshot) {
+        guard canManageSnapshots else { return }
+        Task {
+            do {
+                try await snapshots.restore(snapshot)
+                if let fingerprint = snapshot.suspendedSession {
+                    SavedSession.adopt(fingerprint: fingerprint)
+                } else {
+                    SavedSession.discard()
+                }
+                offerBootRepair = false
+                refreshDiskPresence()
+                transition(.ready)
+                log.notice("restored snapshot \(snapshot.name, privacy: .public)")
+            } catch {
+                notice = "Could not restore the snapshot. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func deleteSnapshot(_ snapshot: DiskSnapshot) {
+        Task {
+            do {
+                try await snapshots.delete(snapshot)
+            } catch {
+                notice = "Could not delete the snapshot. \(error.localizedDescription)"
+            }
+        }
+    }
+
     func repairAndRestart() {
-        guard machine == nil else { return }
+        guard machine == nil, !snapshots.isWorking else { return }
         offerBootRepair = false
         pipeline = Task {
             transition(.starting(.preparingDisk), timeout: 120)
@@ -529,17 +650,15 @@ final class Controller: NSObject, ObservableObject {
         }
     }
 
-    private func cancelBootWork() {
+    /// - Parameter keepingShell: leaves the app logged in to the guest, for a
+    ///   shutdown that is about to be typed there.
+    private func cancelBootWork(keepingShell: Bool = false) {
         pipeline?.cancel()
         pipeline = nil
         silenceWatch?.cancel()
         silenceWatch = nil
-        coreStallWatch?.cancel()
-        coreStallWatch = nil
-        dnsGuard?.cancel()
-        dnsGuard = nil
         stopProgressPolling()
-        shell.reset()
+        if !keepingShell { shell.reset() }
     }
 
     private func observeVMState(_ vm: VZVirtualMachine) {
@@ -576,6 +695,9 @@ final class Controller: NSObject, ObservableObject {
             transition(.stopped)
         }
         finishQuit()
+        let restarting = restartWhenStopped
+        restartWhenStopped = false
+        if restarting, case .stopped = state { start() }
     }
 
     private func finishQuit() {

@@ -3,11 +3,11 @@ import Virtualization
 
 enum Persistence {
     static let defaults: UserDefaults = {
-        guard let suite = ProcessInfo.processInfo.environment["HAOS_RUNNER_DEFAULTS_SUITE"] else {
+        guard let suite = ProcessInfo.processInfo.environment["ANNEX_DEFAULTS_SUITE"] else {
             return .standard
         }
         guard let overridden = UserDefaults(suiteName: suite) else {
-            fatalError("Invalid HAOS_RUNNER_DEFAULTS_SUITE: \(suite)")
+            fatalError("Invalid ANNEX_DEFAULTS_SUITE: \(suite)")
         }
         return overridden
     }()
@@ -15,7 +15,7 @@ enum Persistence {
 
 enum Paths {
     static let support: URL = {
-        if let overridden = ProcessInfo.processInfo.environment["HAOS_RUNNER_SUPPORT_DIR"] {
+        if let overridden = ProcessInfo.processInfo.environment["ANNEX_SUPPORT_DIR"] {
             return URL(fileURLWithPath: overridden, isDirectory: true)
         }
         return FileManager.default
@@ -51,13 +51,28 @@ struct VMSettings: Equatable {
     var memoryGB: Int = 4
     var cpuCount: Int = 4
     var startOnLaunch: Bool = false
+    var bridgedNetworking: Bool = false
+    /// Relay a port on this Mac to Home Assistant for other devices on the network.
+    var shareOnNetwork: Bool = false
+    /// Notify when Home Assistant comes up or a start fails.
+    var notifications: Bool = false
 
     static let memoryRange = 2...16
     static let cpuRange = 2...8
+    /// Home Assistant's usual port, so the shared address looks like any other install.
+    static let sharePort: UInt16 = 8123
 
     private static let memoryKey = "memoryGB"
     private static let cpuKey = "cpuCount"
     private static let startOnLaunchKey = "startOnLaunch"
+    private static let bridgedNetworkingKey = "bridgedNetworking"
+    private static let shareOnNetworkKey = "shareOnNetwork"
+    private static let notificationsKey = "notifications"
+
+    static var bridgedInterface: VZBridgedNetworkInterface? {
+        let interfaces = VZBridgedNetworkInterface.networkInterfaces
+        return interfaces.first { $0.identifier == "en0" } ?? interfaces.first
+    }
 
     static func load() -> VMSettings {
         var settings = VMSettings()
@@ -66,6 +81,9 @@ struct VMSettings: Equatable {
         if memoryRange.contains(storedMemory) { settings.memoryGB = storedMemory }
         if cpuRange.contains(storedCPU) { settings.cpuCount = storedCPU }
         settings.startOnLaunch = Persistence.defaults.bool(forKey: startOnLaunchKey)
+        settings.bridgedNetworking = Persistence.defaults.bool(forKey: bridgedNetworkingKey)
+        settings.shareOnNetwork = Persistence.defaults.bool(forKey: shareOnNetworkKey)
+        settings.notifications = Persistence.defaults.bool(forKey: notificationsKey)
         return settings
     }
 
@@ -73,6 +91,9 @@ struct VMSettings: Equatable {
         Persistence.defaults.set(memoryGB, forKey: Self.memoryKey)
         Persistence.defaults.set(cpuCount, forKey: Self.cpuKey)
         Persistence.defaults.set(startOnLaunch, forKey: Self.startOnLaunchKey)
+        Persistence.defaults.set(bridgedNetworking, forKey: Self.bridgedNetworkingKey)
+        Persistence.defaults.set(shareOnNetwork, forKey: Self.shareOnNetworkKey)
+        Persistence.defaults.set(notifications, forKey: Self.notificationsKey)
     }
 }
 
@@ -96,8 +117,18 @@ enum SavedSession {
         Persistence.defaults.removeObject(forKey: configKey)
     }
 
+    /// The settings the suspended session on disk was saved under, if there is one.
+    static var recordedFingerprint: String? {
+        exists ? Persistence.defaults.string(forKey: configKey) : nil
+    }
+
+    /// Takes over a suspended session that a restored snapshot put back on disk.
+    static func adopt(fingerprint: String) {
+        Persistence.defaults.set(fingerprint, forKey: configKey)
+    }
+
     private static func fingerprint(_ settings: VMSettings) -> String {
-        "\(settings.memoryGB)gb-\(settings.cpuCount)cpu"
+        "\(settings.memoryGB)gb-\(settings.cpuCount)cpu-\(settings.bridgedNetworking ? "bridged" : "nat")"
     }
 }
 
@@ -106,11 +137,14 @@ enum VMError: LocalizedError {
     case noSourceImage
     case toolMissing(String)
     case configurationInvalid(String)
+    case bridgedNetworkingUnavailable
 
     var errorDescription: String? {
         switch self {
         case .diskImageMissing:
             "No Home Assistant disk exists yet. Start Home Assistant to create one."
+        case .bridgedNetworkingUnavailable:
+            "Bridged networking is not available. macOS grants it only to apps signed with the com.apple.vm.networking entitlement."
         case .noSourceImage:
             "No image to build the disk from. Start Home Assistant to download one, or choose a file in settings."
         case .toolMissing(let name):
@@ -260,6 +294,25 @@ enum StableMAC {
     static var current: String? { Persistence.defaults.string(forKey: key) }
 }
 
+/// Virtualization restores a saved machine only into a configuration carrying
+/// the identifier it was saved with, and a configuration left alone gets a new
+/// random one each launch. Without a kept identifier every resume fails with
+/// "invalid argument" and the suspended guest is cold booted instead.
+enum StableMachineIdentifier {
+    private static let key = "machineIdentifier"
+
+    /// The machine's identifier, created and stored on first use.
+    static func identifier(in defaults: UserDefaults = Persistence.defaults) -> VZGenericMachineIdentifier {
+        if let stored = defaults.data(forKey: key),
+           let identifier = VZGenericMachineIdentifier(dataRepresentation: stored) {
+            return identifier
+        }
+        let fresh = VZGenericMachineIdentifier()
+        defaults.set(fresh.dataRepresentation, forKey: key)
+        return fresh
+    }
+}
+
 enum VMBuilder {
     @MainActor
     static func makeConfiguration(_ settings: VMSettings) throws -> VZVirtualMachineConfiguration {
@@ -268,6 +321,10 @@ enum VMBuilder {
         let config = VZVirtualMachineConfiguration()
         config.cpuCount = settings.cpuCount
         config.memorySize = UInt64(settings.memoryGB) * 1024 * 1024 * 1024
+
+        let platform = VZGenericPlatformConfiguration()
+        platform.machineIdentifier = StableMachineIdentifier.identifier()
+        config.platform = platform
 
         let loader = VZEFIBootLoader()
         loader.variableStore = try efiVariableStore()
@@ -278,7 +335,7 @@ enum VMBuilder {
 
         let network = VZVirtioNetworkDeviceConfiguration()
         network.macAddress = StableMAC.address()
-        network.attachment = VZNATNetworkDeviceAttachment()
+        network.attachment = try networkAttachment(settings)
         config.networkDevices = [network]
 
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
@@ -291,6 +348,12 @@ enum VMBuilder {
             throw VMError.configurationInvalid(error.localizedDescription)
         }
         return config
+    }
+
+    private static func networkAttachment(_ settings: VMSettings) throws -> VZNetworkDeviceAttachment {
+        guard settings.bridgedNetworking else { return VZNATNetworkDeviceAttachment() }
+        guard let interface = VMSettings.bridgedInterface else { throw VMError.bridgedNetworkingUnavailable }
+        return VZBridgedNetworkDeviceAttachment(interface: interface)
     }
 
     private static func efiVariableStore() throws -> VZEFIVariableStore {

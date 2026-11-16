@@ -5,7 +5,7 @@ import os
 /// rejects ones arriving over the network, and `:8123` answers a WebSocket
 /// upgrade with a redirect that browsers cannot follow. Onboarding and the live
 /// dashboard therefore fail when the browser talks to Core directly, even
-/// though every HTTP request and the upgrade handshake itself succeed — which
+/// though every HTTP request and the upgrade handshake itself succeed. That
 /// is why testing those two things is not enough to conclude the bridge is
 /// unnecessary. A `socat` container in the guest's own network namespace
 /// forwards `:9999` to Core over loopback, so Home Assistant sees every
@@ -24,79 +24,33 @@ enum RelayInstall {
 }
 
 enum SupervisorProbe {
-    static let progressCommand =
-        "docker logs --since 2m hassio_supervisor 2>/dev/null | "
-            + "grep -iE 'core image|supervisor connectivity|no supervisor internet|"
-            + "has no home assistant version' | tail -n 2"
+    /// Supervisor's newest log line, whatever it says. It logs a download once
+    /// when it starts and then stays silent until it ends, so the last line is
+    /// the only reliable account of what a long wait is waiting for.
+    static let progressCommand = "docker logs --tail 1 hassio_supervisor 2>&1"
 }
 
-/// Home Assistant OS resolves names with its own CoreDNS, which prefers
-/// DNS-over-TLS to public resolvers. Networks that block port 853 or those
-/// resolvers leave the guest with no usable DNS — Supervisor then reports no
-/// connectivity and never downloads Core. The Mac's own VM gateway forwards
-/// DNS reliably, so pointing the guest at it is the repair.
-enum GuestNetwork {
-    static func gatewayAddress(forGuestIP ip: String) -> String? {
-        let octets = ip.split(separator: ".")
-        guard octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }) else { return nil }
-        return octets.dropLast().joined(separator: ".") + ".1"
+/// Why a command sent to the guest produced no answer.
+enum GuestShellError: LocalizedError, Equatable {
+    case unavailable
+    case timedOut
+    case interrupted
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "Home Assistant is not running."
+        case .timedOut: "The machine did not answer in time."
+        case .interrupted: "The machine restarted before it answered."
+        }
     }
-
-    /// `hassio_cli` is not always running, so every `docker exec hassio_cli ha …`
-    /// can fail outright. Each step is therefore best-effort, the CLI is started
-    /// first, and the parts that matter — the resolver and Supervisor itself —
-    /// are driven through docker, which is always available on the host.
-    /// Asks the guest whether it can resolve a name at all. Two details matter:
-    /// the result is a status code rather than a word, so the echoed command the
-    /// console also prints cannot be mistaken for the answer; and the failure
-    /// case needs its own `printf`, because curl writes no `-w` output at all
-    /// when it cannot resolve the host — leaving the probe silent in exactly the
-    /// case it exists to detect. `%s` keeps the literal digits out of the
-    /// command text for the same reason.
-    static let dnsProbeCommand =
-        "curl -sS -m 8 -o /dev/null -w 'haosdns=%{http_code}\\n' "
-            + "https://version.home-assistant.io/stable.json 2>/dev/null "
-            + "|| printf 'haosdns=%s\\n' 000"
-
-    static func dnsProbeResult(in line: String) -> Int? {
-        guard let range = line.range(of: "haosdns=") else { return nil }
-        let digits = line[range.upperBound...].prefix { $0.isNumber }
-        guard digits.count == 3 else { return nil }
-        return Int(digits)
-    }
-
-    static func dnsIsWorking(probeStatus: Int) -> Bool {
-        probeStatus == 200
-    }
-
-    /// Home Assistant OS resolves through its own CoreDNS, which prefers
-    /// DNS-over-TLS on port 853. Networks that block that port leave the guest
-    /// unable to resolve anything, so Supervisor never learns which Core version
-    /// to install and the machine waits forever. Plain resolvers on port 53 fix
-    /// it. Only applied when the probe above proves resolution is broken —
-    /// HAOS's encrypted default is the better choice when it works. The single
-    /// server form is the fallback because only that syntax is verified.
-    static let publicResolverCommand =
-        "docker exec hassio_cli ha dns options --servers dns://1.1.1.1 --servers dns://8.8.8.8 "
-            + "|| docker exec hassio_cli ha dns options --servers dns://8.8.8.8"
-
-    static func repairCommand(gateway: String) -> String {
-        "docker start hassio_cli >/dev/null 2>&1; "
-            + "docker exec hassio_cli ha dns options --servers dns://\(gateway) || true; "
-            + "docker restart hassio_dns >/dev/null; "
-            + "docker restart hassio_supervisor >/dev/null"
-    }
-
-    /// Supervisor decides it has no internet from a single short-timeout request
-    /// and then declines to fetch the version Core is installed from. On a slow
-    /// link that check loses the race repeatedly, and nothing retries it hard
-    /// enough — so nudge it until one attempt succeeds, gently if the CLI is up
-    /// and by restarting Supervisor if it is not.
-    static let nudgeCommand =
-        "docker start hassio_cli >/dev/null 2>&1; "
-            + "docker exec hassio_cli ha supervisor reload || docker restart hassio_supervisor >/dev/null"
 }
 
+/// Runs commands in the guest's root shell over the serial console.
+///
+/// The console is one shared terminal, so commands go out one at a time, and
+/// never while something the user typed may still be running. Each is wrapped
+/// in a pair of marker lines; what the guest prints between them is the
+/// command's output.
 @MainActor
 final class GuestShell {
     enum Stage: Equatable {
@@ -107,27 +61,35 @@ final class GuestShell {
         case atShell
     }
 
-    private struct QueuedCommand {
+    private struct Request {
         let id: Int
         let command: String
-        let completion: (() -> Void)?
+        let completion: (Result<String, GuestShellError>) -> Void
+        var output: [String] = []
+        var began = false
     }
 
     private(set) var stage: Stage = .idle
 
-    private let console: SerialConsole
+    private let type: (String) -> Void
     private let log = Logger(subsystem: "casa.astrohome.haosrunner", category: "shell")
     private var lastActionAt = Date.distantPast
     private var nudge: Timer?
-    private var pending: [QueuedCommand] = []
-    private var inFlight: QueuedCommand?
+    private var pending: [Request] = []
+    private var inFlight: Request?
+    private var deadlines: [Int: Task<Void, Never>] = [:]
     private var nextCommandID = 1
+    private var promptShowing = false
 
-    init(console: SerialConsole) {
-        self.console = console
+    /// - Parameter type: sends one line of text to the guest's terminal.
+    init(type: @escaping (String) -> Void) {
+        self.type = type
     }
 
     var isAtShell: Bool { stage == .atShell }
+
+    /// Whether a command sent now would run straight away.
+    var isIdle: Bool { stage == .atShell && inFlight == nil && pending.isEmpty }
 
     func begin() {
         guard stage == .idle else { return }
@@ -139,44 +101,170 @@ final class GuestShell {
         }
     }
 
+    /// Asks the guest to print its prompt again. A machine resumed from a
+    /// suspended session is already sitting at one and prints nothing new.
+    func requestPrompt() {
+        guard stage != .idle, stage != .atShell else { return }
+        lastActionAt = .now
+        type("")
+    }
+
     func reset() {
         nudge?.invalidate()
         nudge = nil
         stage = .idle
-        pending = []
-        inFlight = nil
+        promptShowing = false
+        failAll(.unavailable)
     }
 
-    func run(_ command: String, completion: (() -> Void)? = nil) {
-        pending.append(QueuedCommand(id: nextCommandID, command: command, completion: completion))
-        nextCommandID += 1
-        begin()
-        sendNextIfReady()
+    /// Runs a command whose output nobody reads.
+    func run(_ command: String, timeout: TimeInterval = 900) {
+        enqueue(command, timeout: timeout) { _ in }
+    }
+
+    /// Runs a command and returns what it printed.
+    func capture(_ command: String, timeout: TimeInterval = 30) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            enqueue(command, timeout: timeout) { continuation.resume(with: $0) }
+        }
+    }
+
+    /// Records that the user typed into the console, so the app waits for the
+    /// prompt to come back instead of typing into whatever they started.
+    func noteUserInput() {
+        promptShowing = false
     }
 
     func handleTail(_ tail: String) {
         guard stage != .idle else { return }
         guard let prompt = GuestPrompt.classify(tail: tail) else { return }
+        // Half a line of command output can end like a login prompt. A restart
+        // in the middle of an answer is caught when that answer times out.
+        if inFlight?.began == true, prompt != .rootShell { return }
         switch prompt {
         case .gettyLogin:
-            attempt(.sentRoot) { console.send("root") }
+            leaveShell()
+            attempt(.sentRoot) { type("root") }
         case .haCLI:
-            attempt(.sentLogin) { console.send("login") }
+            leaveShell()
+            attempt(.sentLogin) { type("login") }
         case .rootShell:
             reachShell()
         }
     }
 
-    func handleLine(_ line: String) {
-        guard let current = inFlight else { return }
-        guard line.trimmingCharacters(in: .whitespaces) == Self.sentinel(for: current.id) else { return }
-        inFlight = nil
-        current.completion?()
+    /// Feeds one console line through the command protocol.
+    ///
+    /// - Returns: true when the line belongs to a command the app sent, which
+    ///   keeps it out of the console the user reads.
+    func handleLine(_ line: String) -> Bool {
+        guard var request = inFlight else { return false }
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if !request.began {
+            // Everything before the opening marker is the terminal echoing the
+            // typed command back.
+            if trimmed == Self.marker("BEGIN", request.id) {
+                request.began = true
+                inFlight = request
+            }
+            return true
+        }
+        if trimmed == Self.marker("END", request.id) {
+            // The command is over, so the shell is reading again. Waiting to
+            // see its prompt would stall the queue whenever a line the guest
+            // prints on its own lands on top of it.
+            promptShowing = true
+            finish(.success(request.output.joined(separator: "\n")))
+            return true
+        }
+        request.output.append(line)
+        inFlight = request
+        return true
+    }
+
+    private static func marker(_ edge: String, _ id: Int) -> String {
+        "HAOS-RUNNER-\(edge)-\(id)"
+    }
+
+    /// The text typed for a request. The quotes vanish when the shell runs the
+    /// `echo`, so the echoed command line can never equal a marker, however the
+    /// terminal wraps it. The bare `echo` before the closing marker starts a
+    /// new line: `ha` prints an error answer without one, which would leave
+    /// the marker glued to the end of the answer.
+    private static func typedText(for request: Request) -> String {
+        "echo HAOS-RUNNER-\"BEGIN\"-\(request.id); \(request.command); echo; echo HAOS-RUNNER-\"END\"-\(request.id)"
+    }
+
+    private func enqueue(
+        _ command: String,
+        timeout: TimeInterval,
+        completion: @escaping (Result<String, GuestShellError>) -> Void
+    ) {
+        guard stage != .idle else {
+            completion(.failure(.unavailable))
+            return
+        }
+        let id = nextCommandID
+        nextCommandID += 1
+        pending.append(Request(id: id, command: command, completion: completion))
+        deadlines[id] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled else { return }
+            self?.expire(id)
+        }
         sendNextIfReady()
     }
 
-    private static func sentinel(for id: Int) -> String {
-        "HAOS-RUNNER-DONE-\(id)"
+    private func sendNextIfReady() {
+        guard stage == .atShell, promptShowing, inFlight == nil, let next = pending.first else { return }
+        pending.removeFirst()
+        inFlight = next
+        promptShowing = false
+        type(Self.typedText(for: next))
+    }
+
+    private func finish(_ result: Result<String, GuestShellError>) {
+        guard let request = inFlight else { return }
+        inFlight = nil
+        deadlines.removeValue(forKey: request.id)?.cancel()
+        request.completion(result)
+        sendNextIfReady()
+    }
+
+    private func expire(_ id: Int) {
+        if let request = inFlight, request.id == id {
+            log.error("guest command timed out: \(request.command, privacy: .public)")
+            // Control-C, so a command that is still running gives the shell back.
+            if request.began {
+                type("\u{03}")
+                promptShowing = true
+            }
+            finish(.failure(.timedOut))
+        } else if let index = pending.firstIndex(where: { $0.id == id }) {
+            let request = pending.remove(at: index)
+            deadlines.removeValue(forKey: id)
+            request.completion(.failure(.timedOut))
+        }
+    }
+
+    private func failAll(_ error: GuestShellError) {
+        let waiting = [inFlight].compactMap { $0 } + pending
+        inFlight = nil
+        pending = []
+        deadlines.values.forEach { $0.cancel() }
+        deadlines = [:]
+        waiting.forEach { $0.completion(.failure(error)) }
+    }
+
+    /// A login prompt while the app believed it was in the shell means the
+    /// guest restarted, so whatever was running is gone.
+    private func leaveShell() {
+        guard stage == .atShell else { return }
+        log.notice("guest shell lost; logging in again")
+        stage = .seekingPrompt
+        promptShowing = false
+        lastActionAt = .distantPast
+        if inFlight != nil { finish(.failure(.interrupted)) }
     }
 
     private func attempt(_ target: Stage, action: () -> Void) {
@@ -189,6 +277,7 @@ final class GuestShell {
 
     private func reachShell() {
         lastActionAt = .now
+        promptShowing = true
         if stage != .atShell {
             stage = .atShell
             log.notice("guest shell ready")
@@ -196,16 +285,9 @@ final class GuestShell {
         sendNextIfReady()
     }
 
-    private func sendNextIfReady() {
-        guard stage == .atShell, inFlight == nil, let next = pending.first else { return }
-        pending.removeFirst()
-        inFlight = next
-        console.send("\(next.command); echo \(Self.sentinel(for: next.id))")
-    }
-
     private func nudgeIfStalled() {
         guard stage != .idle, stage != .atShell else { return }
         guard Date.now.timeIntervalSince(lastActionAt) > 8 else { return }
-        console.send("")
+        type("")
     }
 }

@@ -1,38 +1,6 @@
 import XCTest
 @testable import HAOSRunner
 
-final class GuestNetworkTests: XCTestCase {
-    func testDerivesGatewayFromGuestAddress() {
-        XCTAssertEqual(GuestNetwork.gatewayAddress(forGuestIP: "192.168.64.21"), "192.168.64.1")
-        XCTAssertEqual(GuestNetwork.gatewayAddress(forGuestIP: "192.168.65.2"), "192.168.65.1")
-    }
-
-    func testRejectsMalformedAddresses() {
-        XCTAssertNil(GuestNetwork.gatewayAddress(forGuestIP: "192.168.64"))
-        XCTAssertNil(GuestNetwork.gatewayAddress(forGuestIP: "not.an.ip.addr"))
-        XCTAssertNil(GuestNetwork.gatewayAddress(forGuestIP: "999.1.1.1"))
-    }
-
-    func testRepairCommandPointsResolverAtGatewayAndRestartsServices() {
-        let command = GuestNetwork.repairCommand(gateway: "192.168.64.1")
-        XCTAssertTrue(command.contains("ha dns options --servers dns://192.168.64.1"))
-        XCTAssertTrue(command.contains("docker restart hassio_dns"))
-        XCTAssertTrue(command.contains("docker restart hassio_supervisor"))
-    }
-
-    func testRepairSurvivesAStoppedCLIContainer() {
-        let command = GuestNetwork.repairCommand(gateway: "192.168.64.1")
-        XCTAssertTrue(command.contains("docker start hassio_cli"))
-        XCTAssertTrue(command.contains("|| true"))
-    }
-
-    func testNudgeFallsBackToRestartingSupervisorWithoutTheCLI() {
-        let command = GuestNetwork.nudgeCommand
-        XCTAssertTrue(command.contains("ha supervisor reload"))
-        XCTAssertTrue(command.contains("|| docker restart hassio_supervisor"))
-    }
-}
-
 final class SupervisorConnectivityTests: XCTestCase {
     func testDetectsNoInternetReports() {
         XCTAssertTrue(SupervisorLog.reportsNoInternet(

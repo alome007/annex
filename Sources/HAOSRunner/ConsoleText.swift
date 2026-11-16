@@ -51,7 +51,35 @@ enum GuestPrompt: Equatable {
 }
 
 enum SupervisorLog {
+    /// A component Supervisor is pulling, named by the last word of its image.
+    struct Download: Equatable {
+        let component: String
+        let version: String
+    }
+
+    /// Whether Supervisor itself logged this line.
+    ///
+    /// The console also echoes every command the app types, and an echoed
+    /// command can contain the same phrases its output is searched for. Every
+    /// Supervisor record carries its logger name, which no echo does.
+    static func isRecord(_ line: String) -> Bool {
+        line.contains("[supervisor.")
+    }
+
+    /// Reads the component and version from a record announcing a download.
+    static func download(in line: String) -> Download? {
+        guard isRecord(line),
+              let start = line.range(of: "Downloading docker image "),
+              let tag = line.range(of: " with tag ", range: start.upperBound..<line.endIndex),
+              let component = line[start.upperBound..<tag.lowerBound]
+                  .split(whereSeparator: { $0 == "/" || $0 == "-" }).last else { return nil }
+        let version = line[tag.upperBound...].trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        guard !version.isEmpty else { return nil }
+        return Download(component: String(component), version: version)
+    }
+
     static func reportsNoInternet(_ line: String) -> Bool {
+        guard isRecord(line) else { return false }
         let lowered = line.lowercased()
         return lowered.contains("no supervisor internet")
             || lowered.contains("no supervisor connectivity")

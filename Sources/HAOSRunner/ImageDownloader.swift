@@ -99,7 +99,7 @@ enum ImageDownloader {
             }
             if let cached = ReleaseCache.load() { return cached }
             throw ImageDownloadError.releaseLookupFailed(
-                "GitHub's answer could not be read — something on this network may be intercepting the connection."
+                "GitHub's answer could not be read. Something on this network may be intercepting the connection."
             )
         case 304:
             guard let cached = ReleaseCache.load() else {

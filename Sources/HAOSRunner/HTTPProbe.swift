@@ -31,7 +31,7 @@ enum HTTPProbe {
     /// downloads. The landingpage answers 200 on `/` and 401 on every `/api/`
     /// path, so those cannot tell them apart. Core serves the real frontend
     /// (`/manifest.json`) and answers `/api/onboarding` with 200 before
-    /// onboarding and 404 after it — the landingpage answers 401 to both.
+    /// onboarding and 404 after it; the landingpage answers 401 to both.
     static func coreAnswers(onboardingStatus: Int?, manifestStatus: Int?) -> Bool {
         if manifestStatus == 200 { return true }
         return onboardingStatus == 200 || onboardingStatus == 404

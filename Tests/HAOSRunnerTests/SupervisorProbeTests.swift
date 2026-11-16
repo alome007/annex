@@ -2,13 +2,15 @@ import XCTest
 @testable import HAOSRunner
 
 final class SupervisorProbeTests: XCTestCase {
-    func testProgressPollWatchesProgressAndConnectivityCaseInsensitively() {
+    /// Requirement: the poll reads Supervisor's newest log line whatever it
+    /// says. A download is logged once when it starts and can run far longer
+    /// than any time window, and a filter would hide whatever came after it.
+    func testProgressPollReadsSupervisorsLatestLine() {
         let command = SupervisorProbe.progressCommand
-        XCTAssertTrue(command.contains("grep -iE"))
-        XCTAssertTrue(command.contains("core image"))
-        XCTAssertTrue(command.contains("supervisor connectivity"))
-        XCTAssertTrue(command.contains("no supervisor internet"))
-        XCTAssertTrue(command.contains("--since 2m"))
+        XCTAssertTrue(command.contains("docker logs --tail 1 hassio_supervisor"))
+        XCTAssertTrue(command.contains("2>&1"), "Supervisor logs to stderr")
+        XCTAssertFalse(command.contains("--since"))
+        XCTAssertFalse(command.contains("grep"))
     }
 
     func testDetectsEveryConnectivityWordingSupervisorUses() {
