@@ -15,11 +15,11 @@ jobs:
       - name: Run tests
         run: swift test
       - name: Build app
-        run: HAOS_RUNNER_APP_PATH="$PWD/HAOS Runner.app" ./build.sh
+        run: ANNEX_APP_PATH="$PWD/Annex.app" ./build.sh
       - name: Zip app
-        run: ditto -c -k --keepParent "HAOS Runner.app" "HAOS-Runner-${GITHUB_REF_NAME}.zip"
+        run: ditto -c -k --keepParent "Annex.app" "Annex-${GITHUB_REF_NAME}.zip"
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: HAOS-Runner-*.zip
+          files: Annex-*.zip
           generate_release_notes: true
