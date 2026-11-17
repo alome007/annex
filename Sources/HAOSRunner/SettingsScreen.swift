@@ -15,6 +15,7 @@ struct SettingsScreen: View {
                 machine
                 startup
                 network
+                usb
                 image
                 reset
             }
@@ -101,6 +102,23 @@ struct SettingsScreen: View {
         return "Joins \(interface) directly so Home Assistant can discover devices. Needs a build signed with Apple's com.apple.vm.networking entitlement, which only paid developer accounts get; other builds will not start with this on."
     }
 
+    @ViewBuilder private var usb: some View {
+        if let devices = install.usbDevices {
+            SectionBlock(title: "USB") {
+                SettingRow(title: "Give Home Assistant a USB device", note: usbNote(devices)) {
+                    USBDeviceMenu(devices: devices, choice: $settings.usbDevice)
+                }
+            }
+        }
+    }
+
+    private func usbNote(_ devices: [USBDevice]) -> String {
+        if let chosen = settings.usbDevice, !devices.contains(chosen) {
+            return "\(chosen.name) is not plugged in. Plug it into this Mac and Home Assistant gets it."
+        }
+        return "For a Zigbee or Thread dongle plugged into this Mac. This Mac can't use the device while Home Assistant has it."
+    }
+
     private var image: some View {
         SectionBlock(title: "Image") {
             SettingRow(title: "Source image", note: install.sourceImageName ?? "Automatic: the official image, downloaded for you.") {
@@ -152,6 +170,46 @@ struct SettingsScreen: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             .tint(Theme.secondary)
+    }
+}
+
+/// Picks which USB device plugged into this Mac Home Assistant gets.
+private struct USBDeviceMenu: View {
+    let devices: [USBDevice]
+    @Binding var choice: USBDevice?
+
+    var body: some View {
+        Menu {
+            option("None", device: nil)
+            if !devices.isEmpty { Divider() }
+            // Two identical dongles without serial numbers compare equal, so
+            // the position identifies each row.
+            ForEach(Array(devices.enumerated()), id: \.offset) { _, device in
+                option(device.name, device: device)
+            }
+            if let choice, !devices.contains(choice) {
+                option("\(choice.name) (not plugged in)", device: choice)
+            }
+        } label: {
+            Text(choice?.name ?? "None")
+                .font(.ui(12, .medium))
+                .foregroundStyle(Theme.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Which USB device Home Assistant gets")
+    }
+
+    private func option(_ title: String, device: USBDevice?) -> some View {
+        Button {
+            choice = device
+        } label: {
+            if choice == device {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
     }
 }
 

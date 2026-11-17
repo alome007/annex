@@ -22,12 +22,16 @@ final class Controller: NSObject, ObservableObject {
     /// Home Assistant's address for other devices, while the port is shared.
     @Published private(set) var sharedAddress: URL?
     @Published private(set) var opensAtLogin = false
+    /// USB devices plugged into this Mac, or nil when this build cannot hand
+    /// any to the machine.
+    @Published private(set) var usbDevices: [USBDevice]?
     /// A sentence about something that failed, shown until dismissed.
     @Published var notice: String?
     @Published var settings = VMSettings.load() {
         didSet {
             settings.save()
             applySharing()
+            if settings.usbDevice != oldValue.usbDevice { syncUSB() }
             if settings.notifications, !oldValue.notifications {
                 Task { _ = await Notifier.requestPermission() }
             }
@@ -51,6 +55,9 @@ final class Controller: NSObject, ObservableObject {
     /// Set while a restart's shutdown is under way, so the machine starts
     /// again once it is off.
     private var restartWhenStopped = false
+    /// A `USBDevices` on macOS 27 builds that can pass devices through.
+    private var usbWatcher: AnyObject?
+    private var usbSync: Task<Void, Never>?
 
     private override init() {
         let shell = GuestShell { [console] text in console.send(text, visible: false) }
@@ -70,6 +77,9 @@ final class Controller: NSObject, ObservableObject {
             Task { @MainActor in self?.sharingChanged(to: state) }
         }
         opensAtLogin = LoginItem.isEnabled
+        #if canImport(AccessoryAccess)
+        if #available(macOS 27, *), USBPassthrough.isAvailable { watchUSB() }
+        #endif
         refreshReleases()
         if settings.startOnLaunch {
             Task { @MainActor in self.start() }
@@ -270,6 +280,7 @@ final class Controller: NSObject, ObservableObject {
             if !resumed {
                 try await bootMachine()
             }
+            syncUSB()
             shell.begin()
             if resumed { shell.requestPrompt() }
             startSilenceWatch()
@@ -329,6 +340,12 @@ final class Controller: NSObject, ObservableObject {
         guard vm.canPause else { return false }
         do {
             try Paths.ensureSupportDirectory()
+            #if canImport(AccessoryAccess)
+            if #available(macOS 27, *), let usb {
+                await usbSync?.value
+                try await usb.disconnect()
+            }
+            #endif
             try await vm.pause()
             try await vm.saveMachineStateTo(url: Paths.savedState)
             SavedSession.record(settings)
@@ -687,6 +704,9 @@ final class Controller: NSObject, ObservableObject {
         vmStateObservation = nil
         console.detach()
         machine = nil
+        #if canImport(AccessoryAccess)
+        if #available(macOS 27, *) { usb?.machineStopped() }
+        #endif
         bootStartedAt = nil
         if let error {
             fail(error.localizedDescription)
@@ -704,6 +724,54 @@ final class Controller: NSObject, ObservableObject {
         guard let completion = quitCompletion else { return }
         quitCompletion = nil
         completion()
+    }
+
+    // MARK: - USB devices
+
+    #if canImport(AccessoryAccess)
+    @available(macOS 27, *)
+    private var usb: USBDevices? { usbWatcher as? USBDevices }
+
+    @available(macOS 27, *)
+    private func watchUSB() {
+        let usb = USBDevices()
+        usbWatcher = usb
+        usbDevices = []
+        usb.onChange = { [weak self] in
+            guard let self, let usb = self.usb else { return }
+            self.usbDevices = usb.connected.map(\.device)
+            self.syncUSB()
+        }
+        Task {
+            do {
+                try await usb.start()
+            } catch {
+                notice = "Annex could not list USB devices: \(error.localizedDescription)"
+            }
+        }
+    }
+    #endif
+
+    /// Brings the machine's USB device in line with the chosen one. One change
+    /// runs at a time, because each waits on the machine and two interleaved
+    /// would plug the same device in twice.
+    private func syncUSB() {
+        #if canImport(AccessoryAccess)
+        guard #available(macOS 27, *), let usb else { return }
+        let previous = usbSync
+        usbSync = Task { [weak self] in
+            await previous?.value
+            // While quitting, the device has been unplugged for the suspend
+            // and must stay out of the saved session.
+            guard let self, self.quitCompletion == nil, let vm = self.machine, vm.state == .running else { return }
+            let choice = self.settings.usbDevice
+            do {
+                try await usb.connect(choice, to: vm)
+            } catch {
+                self.notice = "\(choice?.name ?? "The USB device") could not be handed to Home Assistant: \(error.localizedDescription)"
+            }
+        }
+        #endif
     }
 }
 
