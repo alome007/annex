@@ -15,6 +15,7 @@ import XCTest
 final class ScreenRenderTests: XCTestCase {
     private static let size = CGSize(width: 980, height: 660)
     private static let address = URL(string: "http://192.168.64.22:9999/")!
+    private static let dongle = USBDevice(name: "Sonoff Zigbee 3.0 USB Dongle Plus", vendorID: 0x10C4, productID: 0xEA60, serial: nil)
 
     /// A pretend guest with a small, realistic Home Assistant in it.
     private final class SampleGuest {
@@ -225,9 +226,10 @@ final class ScreenRenderTests: XCTestCase {
                         canErase: !status.isActive,
                         hasDownloadedImage: true,
                         canManageSnapshots: !status.isActive,
-                        bridgedInterfaceName: "Wi-Fi"
+                        bridgedInterfaceName: "Wi-Fi",
+                        usbDevices: [Self.dongle]
                     ),
-                    settings: .constant(VMSettings(shareOnNetwork: status.sharedAddress != nil)),
+                    settings: .constant(VMSettings(shareOnNetwork: status.sharedAddress != nil, usbDevice: Self.dongle)),
                     selectedVersion: .constant(nil),
                     notice: .constant(notice)
                 )

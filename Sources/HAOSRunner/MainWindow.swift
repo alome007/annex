@@ -78,6 +78,9 @@ struct InstallOptions: Equatable {
     var canManageSnapshots = false
     /// The interface bridged networking would use, or nil when this Mac offers none.
     var bridgedInterfaceName: String?
+    /// USB devices plugged into this Mac, or nil when this build cannot hand
+    /// any to Home Assistant.
+    var usbDevices: [USBDevice]?
 }
 
 /// What the console screen shows.
@@ -285,7 +288,8 @@ struct MainWindow: View {
                 hasDownloadedImage: controller.hasDownloadedImage,
                 opensAtLogin: controller.opensAtLogin,
                 canManageSnapshots: controller.canManageSnapshots,
-                bridgedInterfaceName: VMSettings.bridgedInterface?.localizedDisplayName
+                bridgedInterfaceName: VMSettings.bridgedInterface?.localizedDisplayName,
+                usbDevices: controller.usbDevices
             ),
             settings: $controller.settings,
             selectedVersion: $controller.selectedVersion,

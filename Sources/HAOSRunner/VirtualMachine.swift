@@ -56,6 +56,8 @@ struct VMSettings: Equatable {
     var shareOnNetwork: Bool = false
     /// Notify when Home Assistant comes up or a start fails.
     var notifications: Bool = false
+    /// The USB device plugged into the machine whenever it is plugged into this Mac.
+    var usbDevice: USBDevice?
 
     static let memoryRange = 2...16
     static let cpuRange = 2...8
@@ -68,32 +70,35 @@ struct VMSettings: Equatable {
     private static let bridgedNetworkingKey = "bridgedNetworking"
     private static let shareOnNetworkKey = "shareOnNetwork"
     private static let notificationsKey = "notifications"
+    private static let usbDeviceKey = "usbDevice"
 
     static var bridgedInterface: VZBridgedNetworkInterface? {
         let interfaces = VZBridgedNetworkInterface.networkInterfaces
         return interfaces.first { $0.identifier == "en0" } ?? interfaces.first
     }
 
-    static func load() -> VMSettings {
+    static func load(from defaults: UserDefaults = Persistence.defaults) -> VMSettings {
         var settings = VMSettings()
-        let storedMemory = Persistence.defaults.integer(forKey: memoryKey)
-        let storedCPU = Persistence.defaults.integer(forKey: cpuKey)
+        let storedMemory = defaults.integer(forKey: memoryKey)
+        let storedCPU = defaults.integer(forKey: cpuKey)
         if memoryRange.contains(storedMemory) { settings.memoryGB = storedMemory }
         if cpuRange.contains(storedCPU) { settings.cpuCount = storedCPU }
-        settings.startOnLaunch = Persistence.defaults.bool(forKey: startOnLaunchKey)
-        settings.bridgedNetworking = Persistence.defaults.bool(forKey: bridgedNetworkingKey)
-        settings.shareOnNetwork = Persistence.defaults.bool(forKey: shareOnNetworkKey)
-        settings.notifications = Persistence.defaults.bool(forKey: notificationsKey)
+        settings.startOnLaunch = defaults.bool(forKey: startOnLaunchKey)
+        settings.bridgedNetworking = defaults.bool(forKey: bridgedNetworkingKey)
+        settings.shareOnNetwork = defaults.bool(forKey: shareOnNetworkKey)
+        settings.notifications = defaults.bool(forKey: notificationsKey)
+        settings.usbDevice = defaults.data(forKey: usbDeviceKey).flatMap { try? JSONDecoder().decode(USBDevice.self, from: $0) }
         return settings
     }
 
-    func save() {
-        Persistence.defaults.set(memoryGB, forKey: Self.memoryKey)
-        Persistence.defaults.set(cpuCount, forKey: Self.cpuKey)
-        Persistence.defaults.set(startOnLaunch, forKey: Self.startOnLaunchKey)
-        Persistence.defaults.set(bridgedNetworking, forKey: Self.bridgedNetworkingKey)
-        Persistence.defaults.set(shareOnNetwork, forKey: Self.shareOnNetworkKey)
-        Persistence.defaults.set(notifications, forKey: Self.notificationsKey)
+    func save(to defaults: UserDefaults = Persistence.defaults) {
+        defaults.set(memoryGB, forKey: Self.memoryKey)
+        defaults.set(cpuCount, forKey: Self.cpuKey)
+        defaults.set(startOnLaunch, forKey: Self.startOnLaunchKey)
+        defaults.set(bridgedNetworking, forKey: Self.bridgedNetworkingKey)
+        defaults.set(shareOnNetwork, forKey: Self.shareOnNetworkKey)
+        defaults.set(notifications, forKey: Self.notificationsKey)
+        defaults.set(usbDevice.flatMap { try? JSONEncoder().encode($0) }, forKey: Self.usbDeviceKey)
     }
 }
 
@@ -127,8 +132,11 @@ enum SavedSession {
         Persistence.defaults.set(fingerprint, forKey: configKey)
     }
 
-    private static func fingerprint(_ settings: VMSettings) -> String {
+    /// What a suspended session depends on. Builds without USB support leave
+    /// the old form unchanged, so updating never discards their sessions.
+    static func fingerprint(_ settings: VMSettings, usbController: Bool = USBPassthrough.isAvailable) -> String {
         "\(settings.memoryGB)gb-\(settings.cpuCount)cpu-\(settings.bridgedNetworking ? "bridged" : "nat")"
+            + (usbController ? "-usb" : "")
     }
 }
 
@@ -341,6 +349,10 @@ enum VMBuilder {
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         config.serialPorts = [SerialConsole.shared.makeConfiguration()]
+        // Empty: the chosen device is plugged in once the machine runs.
+        if #available(macOS 27, *), USBPassthrough.isAvailable {
+            config.usbControllers = [VZXHCIControllerConfiguration()]
+        }
 
         do {
             try config.validate()

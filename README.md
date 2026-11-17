@@ -60,6 +60,20 @@ open ~/Desktop/Annex.app
 
 `build.sh` compiles a release build, packages it as `Annex.app` on your Desktop and signs it for your own Mac. Set `ANNEX_APP_PATH` to put the app somewhere else.
 
+#### USB devices (macOS 27 and later)
+
+Annex can give Home Assistant a USB device plugged into your Mac, such as a Zigbee or Thread dongle. macOS allows this only in apps signed with a paid Apple developer account:
+
+1. In your developer account, register an App ID for `casa.astrohome.haosrunner` with the **Claim USB Accessory** capability.
+2. Create a development provisioning profile for that App ID and your Mac, and download it.
+3. Build with your signing certificate and the profile:
+
+```sh
+ANNEX_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ANNEX_PROFILE=~/Downloads/Annex.provisionprofile ./build.sh
+```
+
+**System > Settings > USB** then lists the devices plugged into your Mac. Annex hands the one you choose to Home Assistant whenever it is plugged in and Home Assistant is running, and takes it back before suspending on quit.
+
 ## Getting started
 
 1. Open Annex and press **Install**. The menu next to it lets you pick a specific Home Assistant OS version.
