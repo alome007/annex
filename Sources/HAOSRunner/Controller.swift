@@ -77,7 +77,9 @@ final class Controller: NSObject, ObservableObject {
             Task { @MainActor in self?.sharingChanged(to: state) }
         }
         opensAtLogin = LoginItem.isEnabled
+        #if canImport(AccessoryAccess)
         if #available(macOS 27, *), USBPassthrough.isAvailable { watchUSB() }
+        #endif
         refreshReleases()
         if settings.startOnLaunch {
             Task { @MainActor in self.start() }
@@ -338,10 +340,12 @@ final class Controller: NSObject, ObservableObject {
         guard vm.canPause else { return false }
         do {
             try Paths.ensureSupportDirectory()
+            #if canImport(AccessoryAccess)
             if #available(macOS 27, *), let usb {
                 await usbSync?.value
                 try await usb.disconnect()
             }
+            #endif
             try await vm.pause()
             try await vm.saveMachineStateTo(url: Paths.savedState)
             SavedSession.record(settings)
@@ -700,7 +704,9 @@ final class Controller: NSObject, ObservableObject {
         vmStateObservation = nil
         console.detach()
         machine = nil
+        #if canImport(AccessoryAccess)
         if #available(macOS 27, *) { usb?.machineStopped() }
+        #endif
         bootStartedAt = nil
         if let error {
             fail(error.localizedDescription)
@@ -722,6 +728,7 @@ final class Controller: NSObject, ObservableObject {
 
     // MARK: - USB devices
 
+    #if canImport(AccessoryAccess)
     @available(macOS 27, *)
     private var usb: USBDevices? { usbWatcher as? USBDevices }
 
@@ -743,11 +750,13 @@ final class Controller: NSObject, ObservableObject {
             }
         }
     }
+    #endif
 
     /// Brings the machine's USB device in line with the chosen one. One change
     /// runs at a time, because each waits on the machine and two interleaved
     /// would plug the same device in twice.
     private func syncUSB() {
+        #if canImport(AccessoryAccess)
         guard #available(macOS 27, *), let usb else { return }
         let previous = usbSync
         usbSync = Task { [weak self] in
@@ -762,6 +771,7 @@ final class Controller: NSObject, ObservableObject {
                 self.notice = "\(choice?.name ?? "The USB device") could not be handed to Home Assistant: \(error.localizedDescription)"
             }
         }
+        #endif
     }
 }
 

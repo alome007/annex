@@ -1,9 +1,13 @@
-import AccessoryAccess
 import Foundation
+// SDKs before macOS 27's have no AccessoryAccess, and CI and releases build
+// with one, so everything that touches a real device compiles out there.
+#if canImport(AccessoryAccess)
+import AccessoryAccess
 import IOKit
 import Security
 import Virtualization
 import os
+#endif
 
 /// Whether this build can hand USB devices to the machine.
 enum USBPassthrough {
@@ -13,8 +17,12 @@ enum USBPassthrough {
     static let entitlement = "com.apple.developer.accessory-access.usb"
 
     static let isAvailable: Bool = {
+        #if canImport(AccessoryAccess)
         guard #available(macOS 27, *), let task = SecTaskCreateFromSelf(nil) else { return false }
         return SecTaskCopyValueForEntitlement(task, entitlement as CFString, nil) as? Bool == true
+        #else
+        return false
+        #endif
     }()
 }
 
@@ -42,7 +50,10 @@ extension USBDevice {
             serial: serial
         )
     }
+}
 
+#if canImport(AccessoryAccess)
+extension USBDevice {
     /// Describes a device plugged into this Mac, with the names macOS read from it.
     @available(macOS 27, *)
     init?(_ accessory: AAUSBAccessory) {
@@ -147,3 +158,4 @@ extension USBDevices: AAUSBAccessoryListener {
         }
     }
 }
+#endif
